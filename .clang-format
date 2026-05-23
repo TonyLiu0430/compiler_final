@@ -20,4 +20,6 @@ BraceWrapping:
 ContinuationIndentWidth: 4
 
 PenaltyIndentedWhitespace: 2
+
+AllowShortEnumsOnASingleLine: false
   

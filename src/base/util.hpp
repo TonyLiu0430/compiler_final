@@ -1,4 +1,5 @@
 #pragma once
+
 #include <utility>
 namespace c9ay {
 template <typename T, std::size_t N>
@@ -15,5 +16,17 @@ constexpr bool is_one_of(char ch) {
         if (ch == c) return true;
     }
     return false;
+}
+
+bool is_alphabet(char ch) {
+    return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z');
+}
+
+bool is_digit(char ch) {
+    return ch >= '0' && ch <= '9';
+}
+
+bool is_ws(char ch) {
+    return is_one_of<" \t\n\r">(ch);
 }
 }  // namespace c9ay
