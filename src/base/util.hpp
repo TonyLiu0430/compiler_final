@@ -26,7 +26,7 @@ bool is_digit(char ch) {
     return ch >= '0' && ch <= '9';
 }
 
-bool is_ws(char ch) {
+bool is_ws_endl(char ch) {
     return is_one_of<" \t\n\r">(ch);
 }
 }  // namespace c9ay

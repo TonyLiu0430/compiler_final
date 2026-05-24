@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <optional>
 #include <string_view>
 #include <unordered_map>
 
@@ -12,19 +13,43 @@
 #undef ERROR
 #endif
 
-namespace c9ay {
+namespace c9ay::lexer {
 enum class token_type {
     ERROR,
+    END,
     IDENTIFIER,
     STRING_CONSTANT,
     NUMBER,
     CHAR_CONSTANT,
     PUNCTUATOR,
+    OPERATOR,
     K_IF,
     K_WHILE,
     K_ELSE,
     K_RETURN
 };
+
+struct Token {
+    std::string_view raw;
+    token_type type;
+    int right;
+    template <token_type t>
+    bool match(char c) {
+        assert_c9ay(raw.size() == 1);
+        return type == t && raw[0] == c;
+    }
+    template <token_type t>
+    bool match(std::string_view s) {
+        assert_c9ay(raw.size() != 1);
+        return type == t && raw == s;
+    }
+    template <token_type t>
+    bool match() {
+        return type == t;
+    }
+};
+
+namespace impl {
 
 token_type keyword_mapping(std::string_view key) {
     static const std::unordered_map<std::string_view, token_type> table = {
@@ -37,13 +62,7 @@ token_type keyword_mapping(std::string_view key) {
     }
 }
 
-struct Token {
-    std::string_view raw;
-    token_type type;
-    int right;
-};
-
-Token match_char_str(Reader &reader) {
+std::optional<Token> match_char_str(Reader &reader) {
     Reader begin = reader;
     auto start = reader.next_char();
     token_type type;
@@ -80,7 +99,7 @@ Token match_char_str(Reader &reader) {
     else {
         reader.report_error("未閉合 string constant");
     }
-    return Token(reader.diff(begin), token_type::ERROR, reader.get_cnt());
+    return std::nullopt;
 }
 
 Token match_identifier_keyword(Reader &reader) {
@@ -112,40 +131,135 @@ Token match_numbers(Reader &reader) {
     return Token(reader.diff(begin), token_type::NUMBER, reader.get_cnt());
 }
 
-Token match_punctuarter(Reader &reader) {
+bool is_punctuarter(char ch) {
+    return is_one_of<"{}#;()">(ch);
+}
+
+bool is_operator(char ch) {
+    return is_one_of<"+-*/%">(ch);
+}
+
+std::optional<Token> match_punctuarter(Reader &reader) {
     Reader begin = reader;
-    if (is_one_of<"{}#;()<>+-*">(reader.next_char())) {
+    if (is_punctuarter(reader.next_char())) {
         return Token(reader.diff(begin), token_type::PUNCTUATOR, reader.get_cnt());
     }
-    return Token(reader.diff(begin), token_type::ERROR, reader.get_cnt());
+    return std::nullopt;
+}
+
+std::optional<Token> match_operator(Reader &reader) {
+    Reader begin = reader;
+    if (is_punctuarter(reader.next_char())) {
+        if (reader.peek_next() == '/') {
+            reader.next_char();
+            while (reader.peek_next() != '\n') {
+                reader.next_char();
+            }
+        }
+        return Token(reader.diff(begin), token_type::OPERATOR, reader.get_cnt());
+    }
+    return std::nullopt;
 }
 
 Token next_token(Reader &reader) {
     while (reader.has_next()) {
         auto c = reader.peek_next();
-        while (is_ws(c)) {
+        while (is_ws_endl(c)) {
             if (!reader.has_next()) {
                 return Token("", token_type::ERROR, 0);
             }
             reader.next_char();
             c = reader.peek_next();
         }
+        std::optional<Token> tok;
         if (c == '\'' || c == '\"') {
             // char constant or string constant
-            return match_char_str(reader);
+            tok = match_char_str(reader);
         }
         else if (is_alphabet(c)) {
             // identifier or keyword
-            return match_identifier_keyword(reader);
+            tok = match_identifier_keyword(reader);
         }
         else if (is_digit(c)) {
             // number
-            return match_numbers(reader);
+            tok = match_numbers(reader);
         }
-        else if (is_one_of<"{}#;()<>+-*">(c)) {
-            return match_punctuarter(reader);
+        else if (is_punctuarter(c)) {
+            tok = match_punctuarter(reader);
+        }
+
+        if (tok.has_value()) {
+            return tok.value();
         }
     }
-    return Token("", token_type::ERROR, 0);
+    return Token("", token_type::END, 0);
 }
-}  // namespace c9ay
+}  // namespace impl
+
+class Lexer {
+    LexerMgr &mgr;
+    int token_cnt = 0;
+
+public:
+    Lexer(LexerMgr &_mgr) : mgr(_mgr) {}
+    Lexer(Lexer &other) : mgr(other.mgr), token_cnt(other.token_cnt) {}
+    void sync(Lexer &other) {
+        assert_c9ay(&mgr == &other.mgr);
+        token_cnt = other.token_cnt;
+    }
+    bool has_next() {
+        return mgr.has_token(token_cnt);
+    }
+    Token next_token() {
+        mgr.get_token(token_cnt++);
+    }
+    Token peek_next() {
+        mgr.get_token(token_cnt);
+    }
+    Token peek_prev() {
+        mgr.get_token(token_cnt - 1);
+    }
+    Token prev_token() {
+        mgr.get_token(--token_cnt);
+    }
+};
+
+class LexerMgr {
+    Reader reader;
+    std::vector<Token> tokens;
+    bool end = false;
+
+    void fetch_token(int idx) {
+        if (end) return;
+        while (tokens.size() <= idx) {
+            tokens.push_back(lexer::impl::next_token(reader));
+            if (tokens.back().type == token_type::END) {
+                end = true;
+                break;
+            }
+        }
+    }
+
+public:
+    LexerMgr(Reader &_reader) : reader(_reader) {}
+    Token next_token() {
+        Token token = lexer::impl::next_token(reader);
+        tokens.push_back(token);
+        return token;
+    }
+
+    bool has_token(int idx) {
+        fetch_token(idx);
+        return idx < tokens.size();
+    }
+    Token get_token(int idx) {
+        fetch_token(idx);
+        assert_c9ay(0 <= idx && idx < tokens.size());
+        return tokens[idx];
+    }
+    Lexer get_lexer() {
+        return Lexer(*this);
+    }
+};
+
+}  // namespace c9ay::lexer
