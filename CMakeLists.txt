@@ -9,6 +9,7 @@ file(GLOB_RECURSE HEADERS CONFIGURE_DEPENDS "src/*.h" "src/*.hpp")
 file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS "src/*.cpp")
 include_directories(src)
 include_directories(include)
+include_directories(include/third_party)
 
 if(MSVC)
     add_compile_options("/utf-8")

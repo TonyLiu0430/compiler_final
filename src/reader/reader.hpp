@@ -32,11 +32,14 @@ public:
     Reader clone() {
         return Reader(*this);
     }
-    std::string report_error(const std::string &error_msg) {
-        auto [line, column] = locate(cnt);
+    std::string report_error(const std::string &error_msg, int count) {
+        auto [line, column] = locate(count);
         auto err_msg = std::format("{}:{}:{} error : {}", file_name, line, column, error_msg);
         std::print("{}", err_msg);
         return err_msg;
+    }
+    std::string report_error(const std::string &error_msg) {
+        return report_error(error_msg, cnt);
     }
     char32_t next_char() {
         assert_c9ay(cnt < raw.size());

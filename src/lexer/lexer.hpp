@@ -7,7 +7,9 @@
 
 #include "base/error.hpp"
 #include "base/util.hpp"
+#include "magic_enum.hpp"
 #include "reader/reader.hpp"
+#include "utility"
 
 #ifdef ERROR
 #undef ERROR
@@ -26,7 +28,11 @@ enum class token_type {
     K_IF,
     K_WHILE,
     K_ELSE,
-    K_RETURN
+    K_RETURN,
+    K_BREAK,
+    K_CONTINUE,
+    K_CONST,
+    K_STATIC
 };
 
 struct Token {
@@ -51,9 +57,33 @@ struct Token {
 
 namespace impl {
 
+namespace reflect {
+// TODO
+
+std::unordered_map<std::string_view, token_type> reflect_keyword() {
+    std::unordered_map<std::string_view, token_type> res;
+    for (int i = 0; i < magic_enum::enum_count<token_type>(); i++) {
+        token_type type = magic_enum::enum_value<token_type>(i);
+        std::string_view name = magic_enum::enum_name<token_type>(type);
+
+        if (name.starts_with("K_")) {
+            std::string *lower = new string(name.substr(2));
+            for (auto &c : *lower) {
+                if (c >= 'A' && c <= 'Z') {
+                    c = (c - 'A') + 'a';
+                }
+            }
+            std::string_view sv = *lower;
+            res[sv] = type;
+        }
+    }
+    return res;
+}
+
+}  // namespace reflect
+
 token_type keyword_mapping(std::string_view key) {
-    static const std::unordered_map<std::string_view, token_type> table = {
-        {"if", token_type::K_IF}, {"while", token_type::K_WHILE}, {"return", token_type::K_RETURN}};
+    static const std::unordered_map<std::string_view, token_type> table = reflect::reflect_keyword();
     if (table.contains(key)) {
         return table.at(key);
     }
@@ -222,6 +252,9 @@ public:
     Token prev_token() {
         mgr.get_token(--token_cnt);
     }
+    void report_error(const std::string &s) {
+        mgr.report_error(s, token_cnt);
+    }
 };
 
 class LexerMgr {
@@ -259,6 +292,9 @@ public:
     }
     Lexer get_lexer() {
         return Lexer(*this);
+    }
+    void report_error(const std::string &error_msg, int idx) {
+        reader.report_error(error_msg, tokens[idx].right);
     }
 };
 

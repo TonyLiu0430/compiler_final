@@ -83,8 +83,38 @@ struct Block : Node {
             }
         }
         if (!success) {
-            report_error("block not close");
+            lexer.report_error("block not close");
+            return nullptr;
+        }
+        return std::make_unique<Block>(cur);
+    }
+};
+
+struct Declvariable {
+    lexer::Token type;
+    lexer::Token varible_name;
+
+    static std::unique_ptr<Node> match(lexer::Lexer& lexer) {
+        Declvariable cur;
+        bool is_const = false;
+        bool is_static = false;
+        lexer::Token token = lexer.next_token();
+        while (!token.match<lexer::token_type::IDENTIFIER>()) {
+            if (token.match<lexer::token_type::K_CONST>()) {
+                if (is_const) {
+                    lexer.report_error("duplicate 'const' declaration specifier");
+                }
+                is_const = true;
+            }
+            else if (token.match<lexer::token_type::K_STATIC>()) {
+                if (is_static) {
+                    lexer.report_error("duplicate 'static' declaration specifier");
+                }
+                is_static = true;
+            }
+            token = lexer.next_token();
         }
     };
+};
 
 }  // namespace c9ay::parser
