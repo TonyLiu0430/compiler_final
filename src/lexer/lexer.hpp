@@ -240,6 +240,16 @@ public:
     bool has_next() {
         return mgr.has_token(token_cnt);
     }
+    template <class T>
+    void panic_recovery() {
+        while (1) {
+            Token tok = next_token();
+            if (T::Panic_sync::is_sync_token(tok)) {
+                next_token();
+                return;
+            }
+        }
+    }
     Token next_token() {
         mgr.get_token(token_cnt++);
     }

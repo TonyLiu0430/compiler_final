@@ -50,10 +50,18 @@ struct Statement : Node {
     static std::unique_ptr<Node> match(lexer::Lexer&) {
         return nullptr;
     }
+    struct Panic_sync {
+        static bool is_sync_token(lexer::Token tok) {
+            if (tok.match<lexer::token_type::PUNCTUATOR>('}') || tok.match<lexer::token_type::PUNCTUATOR>(';')) {
+                return true;
+            }
+            return false;
+        }
+    };
 };
 
-struct If_statement : Node {};
-struct While_statement : Node {};
+struct If_statement : Statement {};
+struct While_statement : Statement {};
 
 struct Program : Node {
     static std::unique_ptr<Node> match(lexer::Lexer&) {
@@ -90,7 +98,7 @@ struct Block : Node {
     }
 };
 
-struct Declvariable {
+struct Declvariable : Statement {
     lexer::Token type;
     lexer::Token varible_name;
 
@@ -113,6 +121,13 @@ struct Declvariable {
                 is_static = true;
             }
             token = lexer.next_token();
+        }
+        cur.type = token;
+        token = lexer.next_token();
+        if (!token.match<lexer::token_type::IDENTIFIER>()) {
+            lexer.report_error("varible declaration expect a identifier");
+            lexer.panic_recovery<Declvariable>();
+            return;
         }
     };
 };
