@@ -201,3 +201,82 @@ TEST_CASE("block parses declaration if while and do while") {
     CHECK(do_while_statement->condition != nullptr);
     CHECK(do_while_statement->body != nullptr);
 }
+
+TEST_CASE("for statement supports declaration expression and empty clauses") {
+    std::string source = R"(
+        {
+            for (int i = 0; i < 10; i++) {
+                continue;
+            }
+            for (i = 0; i < 3; i = i + 1)
+                break;
+            for (;;)
+                return;
+        }
+    )";
+
+    Reader reader("for.c", source);
+    lexer::LexerMgr mgr(reader);
+    auto lexer = mgr.get_lexer();
+    auto block = parser::Block::match(lexer);
+
+    REQUIRE(block != nullptr);
+    REQUIRE(block->statements.size() == 3);
+
+    auto first =
+        dynamic_cast<parser::For_statement *>(block->statements[0].get());
+    auto second =
+        dynamic_cast<parser::For_statement *>(block->statements[1].get());
+    auto third =
+        dynamic_cast<parser::For_statement *>(block->statements[2].get());
+
+    REQUIRE(first != nullptr);
+    REQUIRE(second != nullptr);
+    REQUIRE(third != nullptr);
+
+    CHECK(dynamic_cast<parser::Declvariable *>(first->initializer.get()) != nullptr);
+    CHECK(first->condition != nullptr);
+    CHECK(first->iteration != nullptr);
+    CHECK(dynamic_cast<parser::Block *>(first->body.get()) != nullptr);
+
+    CHECK(dynamic_cast<parser::Expression_statement *>(second->initializer.get()) != nullptr);
+    CHECK(second->condition != nullptr);
+    CHECK(second->iteration != nullptr);
+    CHECK(dynamic_cast<parser::Break_statement *>(second->body.get()) != nullptr);
+
+    CHECK(third->initializer == nullptr);
+    CHECK(third->condition == nullptr);
+    CHECK(third->iteration == nullptr);
+    CHECK(dynamic_cast<parser::Return_statement *>(third->body.get()) != nullptr);
+}
+
+TEST_CASE("return break and continue parse as jump statements") {
+    std::string source = R"(
+        {
+            return value + 1;
+            return;
+            break;
+            continue;
+        }
+    )";
+
+    Reader reader("jump.c", source);
+    lexer::LexerMgr mgr(reader);
+    auto lexer = mgr.get_lexer();
+    auto block = parser::Block::match(lexer);
+
+    REQUIRE(block != nullptr);
+    REQUIRE(block->statements.size() == 4);
+
+    auto return_value =
+        dynamic_cast<parser::Return_statement *>(block->statements[0].get());
+    auto return_void =
+        dynamic_cast<parser::Return_statement *>(block->statements[1].get());
+
+    REQUIRE(return_value != nullptr);
+    REQUIRE(return_void != nullptr);
+    CHECK(return_value->expression != nullptr);
+    CHECK(return_void->expression == nullptr);
+    CHECK(dynamic_cast<parser::Break_statement *>(block->statements[2].get()) != nullptr);
+    CHECK(dynamic_cast<parser::Continue_statement *>(block->statements[3].get()) != nullptr);
+}

@@ -64,6 +64,7 @@ declarator-suffix =
 statement =
     block
   | if-statement
+  | for-statement
   | while-statement
   | do-while-statement
   | expression-statement
@@ -92,6 +93,22 @@ while-statement =
     expression,
     ")",
     statement ;
+
+for-statement =
+    "for",
+    "(",
+    for-initializer,
+    [ expression ],
+    ";",
+    [ expression ],
+    ")",
+    statement ;
+
+for-initializer =
+    ";"
+  | expression,
+    ";"
+  | declaration ;
 
 do-while-statement =
     "do",

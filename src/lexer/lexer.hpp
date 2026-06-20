@@ -29,6 +29,7 @@ enum class token_type {
     PUNCTUATOR,
     OPERATOR,
     K_IF,
+    K_FOR,
     K_WHILE,
     K_DO,
     K_ELSE,

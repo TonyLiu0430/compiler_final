@@ -199,6 +199,37 @@ struct Do_while_statement : Statement {
     static std::unique_ptr<Do_while_statement> match(lexer::Lexer &lexer);
 };
 
+struct For_statement : Statement {
+    static constexpr lexer::token_type start = lexer::token_type::K_FOR;
+
+    std::unique_ptr<Statement> initializer;
+    std::unique_ptr<Expression> condition;
+    std::unique_ptr<Expression> iteration;
+    std::unique_ptr<Statement> body;
+
+    static std::unique_ptr<For_statement> match(lexer::Lexer &lexer);
+};
+
+struct Return_statement : Statement {
+    static constexpr lexer::token_type start = lexer::token_type::K_RETURN;
+
+    std::unique_ptr<Expression> expression;
+
+    static std::unique_ptr<Return_statement> match(lexer::Lexer &lexer);
+};
+
+struct Break_statement : Statement {
+    static constexpr lexer::token_type start = lexer::token_type::K_BREAK;
+
+    static std::unique_ptr<Break_statement> match(lexer::Lexer &lexer);
+};
+
+struct Continue_statement : Statement {
+    static constexpr lexer::token_type start = lexer::token_type::K_CONTINUE;
+
+    static std::unique_ptr<Continue_statement> match(lexer::Lexer &lexer);
+};
+
 struct Expression_statement : Statement {
     std::unique_ptr<Expression> expression;
 
@@ -656,6 +687,96 @@ inline std::unique_ptr<Do_while_statement> Do_while_statement::match(lexer::Lexe
     cur->error_occur |= cur->condition->error_occur;
     if (!expect_operator(lexer, ')', "expect ')' after do while condition")) return nullptr;
     if (!expect_punctuarter(lexer, ';', "expect ';' after do while")) return nullptr;
+    return cur;
+}
+
+inline std::unique_ptr<For_statement> For_statement::match(lexer::Lexer &lexer) {
+    auto cur = std::make_unique<For_statement>();
+    assert_c9ay(lexer.next_token().match<lexer::token_type::K_FOR>());
+
+    if (!expect_operator(lexer, '(', "expect '(' after for")) return nullptr;
+
+    if (lexer.peek_next().match<lexer::token_type::PUNCTUATOR>(';')) {
+        lexer.next_token();
+    }
+    else if (auto declaration = Declvariable::try_match(lexer)) {
+        cur->initializer = std::move(declaration);
+    }
+    else {
+        auto initializer = std::make_unique<Expression_statement>();
+        initializer->expression = Expression::match(lexer);
+        initializer->error_occur = initializer->expression->error_occur;
+        if (!expect_punctuarter(lexer, ';', "expect ';' after for initializer")) {
+            return nullptr;
+        }
+        cur->initializer = std::move(initializer);
+    }
+
+    if (lexer.peek_next().match<lexer::token_type::PUNCTUATOR>(';')) {
+        lexer.next_token();
+    }
+    else {
+        cur->condition = Expression::match(lexer);
+        cur->error_occur |= cur->condition->error_occur;
+        if (!expect_punctuarter(lexer, ';', "expect ';' after for condition")) {
+            return nullptr;
+        }
+    }
+
+    if (lexer.peek_next().raw.size() == 1 &&
+        lexer.peek_next().match<lexer::token_type::OPERATOR>(')')) {
+        lexer.next_token();
+    }
+    else {
+        cur->iteration = Expression::match(lexer);
+        cur->error_occur |= cur->iteration->error_occur;
+        if (!expect_operator(lexer, ')', "expect ')' after for iteration")) {
+            return nullptr;
+        }
+    }
+
+    cur->body = Statement::match(lexer);
+    if (!cur->body) return nullptr;
+
+    if (cur->initializer) {
+        cur->error_occur |= cur->initializer->error_occur;
+    }
+    cur->error_occur |= cur->body->error_occur;
+    return cur;
+}
+
+inline std::unique_ptr<Return_statement> Return_statement::match(lexer::Lexer &lexer) {
+    auto cur = std::make_unique<Return_statement>();
+    assert_c9ay(lexer.next_token().match<lexer::token_type::K_RETURN>());
+
+    if (lexer.peek_next().match<lexer::token_type::PUNCTUATOR>(';')) {
+        lexer.next_token();
+        return cur;
+    }
+
+    cur->expression = Expression::match(lexer);
+    cur->error_occur = cur->expression->error_occur;
+    if (!expect_punctuarter(lexer, ';', "expect ';' after return")) {
+        return nullptr;
+    }
+    return cur;
+}
+
+inline std::unique_ptr<Break_statement> Break_statement::match(lexer::Lexer &lexer) {
+    auto cur = std::make_unique<Break_statement>();
+    assert_c9ay(lexer.next_token().match<lexer::token_type::K_BREAK>());
+    if (!expect_punctuarter(lexer, ';', "expect ';' after break")) {
+        return nullptr;
+    }
+    return cur;
+}
+
+inline std::unique_ptr<Continue_statement> Continue_statement::match(lexer::Lexer &lexer) {
+    auto cur = std::make_unique<Continue_statement>();
+    assert_c9ay(lexer.next_token().match<lexer::token_type::K_CONTINUE>());
+    if (!expect_punctuarter(lexer, ';', "expect ';' after continue")) {
+        return nullptr;
+    }
     return cur;
 }
 
