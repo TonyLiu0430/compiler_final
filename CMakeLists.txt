@@ -26,3 +26,22 @@ if(ENABLE_EXPERIMENTAL_REFLECTION)
         message(FATAL_ERROR "ENABLE_EXPERIMENTAL_REFLECTION currently requires GCC with -freflection support")
     endif()
 endif()
+
+if(MINGW AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    target_link_libraries(compiler PRIVATE stdc++exp)
+endif()
+
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(compiler_tests tests/parser_test.cpp)
+
+    if(ENABLE_EXPERIMENTAL_REFLECTION)
+        target_compile_options(compiler_tests PRIVATE -freflection)
+    endif()
+
+    if(MINGW AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        target_link_libraries(compiler_tests PRIVATE stdc++exp)
+    endif()
+
+    add_test(NAME compiler_tests COMMAND compiler_tests)
+endif()

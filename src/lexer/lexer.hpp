@@ -2,9 +2,12 @@
 
 #include <ext/pb_ds/assoc_container.hpp>
 #include <ext/pb_ds/trie_policy.hpp>
+#include <array>
 #include <meta>
 #include <optional>
+#include <string>
 #include <string_view>
+#include <vector>
 
 #include "base/error.hpp"
 #include "base/util.hpp"
@@ -27,6 +30,7 @@ enum class token_type {
     OPERATOR,
     K_IF,
     K_WHILE,
+    K_DO,
     K_ELSE,
     K_RETURN,
     K_BREAK,
@@ -41,13 +45,15 @@ struct Token {
     int right;
     template <token_type t>
     bool match(char c) {
+        if (type != t) return false;
         assert_c9ay(raw.size() == 1);
-        return type == t && raw[0] == c;
+        return raw[0] == c;
     }
     template <token_type t>
     bool match(std::string_view s) {
+        if (type != t) return false;
         assert_c9ay(raw.size() != 1);
-        return type == t && raw == s;
+        return raw == s;
     }
     template <token_type t>
     bool match() {
@@ -163,11 +169,67 @@ Token match_numbers(Reader &reader) {
 }
 
 bool is_punctuarter(char ch) {
-    return is_one_of<"{}#;()">(ch);
+    return is_one_of<"{}#;">(ch);
 }
 
-bool is_operator(Reader &reader) {
-    return is_one_of<"+-*/%<>">(ch);
+bool is_operator(char ch) {
+    return is_one_of<"+-*/%<>=!&|^~.[]()?:,">(ch);
+}
+
+struct Operator_trie {
+    struct Node {
+        std::array<int, 128> next;
+        bool terminal = false;
+
+        Node() {
+            next.fill(-1);
+        }
+    };
+
+    std::vector<Node> nodes;
+
+    Operator_trie() {
+        nodes.emplace_back();
+
+        constexpr std::string_view operators[] = {
+            // postfix / member
+            "[",   "]",   "(",   ")",   "++",  "--",  ".",   "->",
+
+            // unary / arithmetic
+            "+",   "-",   "*",   "/",   "%",   "!",   "~",
+
+            // shift / comparison
+            "<<",  ">>",  "<",   ">",   "<=",  ">=",  "==",  "!=",
+
+            // bitwise / logical
+            "&",   "^",   "|",   "&&",  "||",
+
+            // assignment
+            "=",   "*=",  "/=",  "%=",  "+=",  "-=",
+            "<<=", ">>=", "&=",  "^=",  "|=",
+
+            // conditional / comma
+            "?",   ":",   ","
+        };
+
+        for (auto op : operators) {
+            int node = 0;
+            for (char ch : op) {
+                int idx = static_cast<unsigned char>(ch);
+                if (nodes[node].next[idx] == -1) {
+                    nodes[node].next[idx] = static_cast<int>(nodes.size());
+                    nodes.emplace_back();
+                }
+                node = nodes[node].next[idx];
+            }
+            nodes[node].terminal = true;
+        }
+    }
+};
+
+const Operator_trie &get_operator_trie() {
+    static const Operator_trie trie;
+    return trie;
 }
 
 std::optional<Token> match_punctuarter(Reader &reader) {
@@ -180,34 +242,94 @@ std::optional<Token> match_punctuarter(Reader &reader) {
 
 std::optional<Token> match_operator(Reader &reader) {
     Reader begin = reader;
-    while (is_operator(reader.next_char())) {
-        if (reader.peek_next() == '/') {
+    const auto &trie = get_operator_trie();
+    int node = 0;
+    int consumed = 0;
+    int matched = -1;
+
+    while (reader.has_next()) {
+        auto ch = reader.peek_next();
+        if (ch < 0 || ch >= 128) break;
+
+        int next = trie.nodes[node].next[static_cast<int>(ch)];
+        if (next == -1) break;
+
+        reader.next_char();
+        consumed++;
+        node = next;
+        if (trie.nodes[node].terminal) {
+            matched = consumed;
+        }
+    }
+
+    if (matched == -1) {
+        while (consumed-- > 0) reader.prev_char();
+        return std::nullopt;
+    }
+    while (consumed > matched) {
+        reader.prev_char();
+        consumed--;
+    }
+
+    return Token(reader.diff(begin), token_type::OPERATOR, reader.get_cnt());
+}
+
+bool match_comment(Reader &reader) {
+    Reader begin = reader;
+    if (reader.next_char() != '/') {
+        reader.prev_char();
+        return false;
+    }
+    if (!reader.has_next()) {
+        reader.prev_char();
+        return false;
+    }
+
+    auto second = reader.next_char();
+    if (second == '/') {
+        while (reader.has_next() && reader.peek_next() != '\n') {
             reader.next_char();
-            while (reader.peek_next() != '\n') {
+        }
+        return true;
+    }
+    if (second == '*') {
+        while (reader.has_next()) {
+            auto ch = reader.next_char();
+            if (ch == '*' && reader.has_next() && reader.peek_next() == '/') {
                 reader.next_char();
+                return true;
             }
         }
-        return Token(reader.diff(begin), token_type::OPERATOR, reader.get_cnt());
+        reader.report_error("unterminated block comment", begin.get_cnt());
+        return true;
     }
-    return std::nullopt;
+
+    reader.prev_char();
+    reader.prev_char();
+    return false;
 }
 
 Token next_token(Reader &reader) {
     while (reader.has_next()) {
         auto c = reader.peek_next();
-        while (is_ws_endl(c)) {
-            if (!reader.has_next()) {
-                return Token("", token_type::ERROR, 0);
-            }
+        while (reader.has_next() && is_ws_endl(c)) {
             reader.next_char();
+            if (!reader.has_next()) {
+                return Token("", token_type::END, reader.get_cnt());
+            }
             c = reader.peek_next();
         }
+
+        if (c == '/' && match_comment(reader)) {
+            continue;
+        }
+
         std::optional<Token> tok;
         if (c == '\'' || c == '\"') {
             // char constant or string constant
             tok = match_char_str(reader);
         }
-        else if (is_alphabet(c)) {
+        else if (is_alphabet(c) || c == '_') {
             // identifier or keyword
             tok = match_identifier_keyword(reader);
         }
@@ -218,14 +340,68 @@ Token next_token(Reader &reader) {
         else if (is_punctuarter(c)) {
             tok = match_punctuarter(reader);
         }
+        else if (is_operator(c)) {
+            tok = match_operator(reader);
+        }
 
         if (tok.has_value()) {
             return tok.value();
         }
+
+        Reader begin = reader;
+        reader.report_error("unknown character");
+        reader.next_char();
+        return Token(reader.diff(begin), token_type::ERROR, reader.get_cnt());
     }
-    return Token("", token_type::END, 0);
+    return Token("", token_type::END, reader.get_cnt());
 }
 }  // namespace impl
+
+class Lexer;
+
+class LexerMgr {
+    Reader reader;
+    std::vector<Token> tokens;
+    bool end = false;
+
+    void fetch_token(int idx) {
+        if (end) return;
+        while (static_cast<int>(tokens.size()) <= idx) {
+            tokens.push_back(lexer::impl::next_token(reader));
+            if (tokens.back().type == token_type::END) {
+                end = true;
+                break;
+            }
+        }
+    }
+
+public:
+    LexerMgr(Reader &_reader) : reader(_reader) {}
+
+    bool has_token(int idx) {
+        fetch_token(idx);
+        return idx < static_cast<int>(tokens.size()) &&
+               tokens[idx].type != token_type::END;
+    }
+
+    Token get_token(int idx) {
+        fetch_token(idx);
+        assert_c9ay(0 <= idx && idx < static_cast<int>(tokens.size()));
+        return tokens[idx];
+    }
+
+    Lexer get_lexer();
+
+    void report_error(const std::string &error_msg, int idx) {
+        fetch_token(idx);
+        if (idx < static_cast<int>(tokens.size())) {
+            reader.report_error(error_msg, tokens[idx].right);
+        }
+        else {
+            reader.report_error(error_msg);
+        }
+    }
+};
 
 class Lexer {
     LexerMgr &mgr;
@@ -241,72 +417,43 @@ public:
     bool has_next() {
         return mgr.has_token(token_cnt);
     }
+    bool has_next(int offset) {
+        return mgr.has_token(token_cnt + offset);
+    }
     template <class T>
-    void panic_recovery() {
-        while (1) {
+    void panic_recovery(bool consume_sync_token = true) {
+        while (has_next()) {
             Token tok = next_token();
             if (T::Panic_sync::is_sync_token(tok)) {
-                next_token();
+                if (!consume_sync_token) {
+                    prev_token();
+                }
                 return;
             }
         }
     }
     Token next_token() {
-        mgr.get_token(token_cnt++);
+        return mgr.get_token(token_cnt++);
     }
     Token peek_next() {
-        mgr.get_token(token_cnt);
+        return mgr.get_token(token_cnt);
+    }
+    Token peek_next(int offset) {
+        return mgr.get_token(token_cnt + offset);
     }
     Token peek_prev() {
-        mgr.get_token(token_cnt - 1);
+        return mgr.get_token(token_cnt - 1);
     }
     Token prev_token() {
-        mgr.get_token(--token_cnt);
+        return mgr.get_token(--token_cnt);
     }
     void report_error(const std::string &s) {
         mgr.report_error(s, token_cnt);
     }
 };
 
-class LexerMgr {
-    Reader reader;
-    std::vector<Token> tokens;
-    bool end = false;
-
-    void fetch_token(int idx) {
-        if (end) return;
-        while (tokens.size() <= idx) {
-            tokens.push_back(lexer::impl::next_token(reader));
-            if (tokens.back().type == token_type::END) {
-                end = true;
-                break;
-            }
-        }
-    }
-
-public:
-    LexerMgr(Reader &_reader) : reader(_reader) {}
-    Token next_token() {
-        Token token = lexer::impl::next_token(reader);
-        tokens.push_back(token);
-        return token;
-    }
-
-    bool has_token(int idx) {
-        fetch_token(idx);
-        return idx < tokens.size();
-    }
-    Token get_token(int idx) {
-        fetch_token(idx);
-        assert_c9ay(0 <= idx && idx < tokens.size());
-        return tokens[idx];
-    }
-    Lexer get_lexer() {
-        return Lexer(*this);
-    }
-    void report_error(const std::string &error_msg, int idx) {
-        reader.report_error(error_msg, tokens[idx].right);
-    }
-};
+inline Lexer LexerMgr::get_lexer() {
+    return Lexer(*this);
+}
 
 }  // namespace c9ay::lexer

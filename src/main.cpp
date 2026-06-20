@@ -28,9 +28,9 @@ int main() {
         std::print("{}", content);
         Reader reader(path, content);
         while (1) {
-            Token t = next_token(reader);
+            lexer::Token t = lexer::impl::next_token(reader);
             if (t.raw == "") break;
-            println("<{} : {}>", t.raw, int(t.type));
+            std::println("<{} : {}>", t.raw, int(t.type));
         }
     } catch (std::exception& e) {
         std::cout << "error occur : " << e.what();
