@@ -1,13 +1,13 @@
 #pragma once
 
-#include <memory>
+#include <ext/pb_ds/assoc_container.hpp>
+#include <ext/pb_ds/trie_policy.hpp>
+#include <meta>
 #include <optional>
 #include <string_view>
-#include <unordered_map>
 
 #include "base/error.hpp"
 #include "base/util.hpp"
-#include "magic_enum.hpp"
 #include "reader/reader.hpp"
 #include "utility"
 
@@ -58,38 +58,39 @@ struct Token {
 namespace impl {
 
 namespace reflect {
-// TODO
+constexpr bool matches_keyword(std::string_view key, std::string_view enumerator_name) {
+    constexpr std::string_view prefix = "K_";
+    if (!enumerator_name.starts_with(prefix) ||
+        key.size() != enumerator_name.size() - prefix.size()) {
+        return false;
+    }
 
-std::unordered_map<std::string_view, token_type> reflect_keyword() {
-    std::unordered_map<std::string_view, token_type> res;
-    for (int i = 0; i < magic_enum::enum_count<token_type>(); i++) {
-        token_type type = magic_enum::enum_value<token_type>(i);
-        std::string_view name = magic_enum::enum_name<token_type>(type);
-
-        if (name.starts_with("K_")) {
-            std::string *lower = new string(name.substr(2));
-            for (auto &c : *lower) {
-                if (c >= 'A' && c <= 'Z') {
-                    c = (c - 'A') + 'a';
-                }
-            }
-            std::string_view sv = *lower;
-            res[sv] = type;
+    for (std::size_t i = 0; i < key.size(); ++i) {
+        char reflected = enumerator_name[i + prefix.size()];
+        if (reflected >= 'A' && reflected <= 'Z') {
+            reflected += 'a' - 'A';
+        }
+        if (key[i] != reflected) {
+            return false;
         }
     }
-    return res;
+    return true;
 }
 
 }  // namespace reflect
 
 token_type keyword_mapping(std::string_view key) {
-    static const std::unordered_map<std::string_view, token_type> table = reflect::reflect_keyword();
-    if (table.contains(key)) {
-        return table.at(key);
+    template for (constexpr auto enumerator :
+                  std::define_static_array(
+                      std::meta::enumerators_of(^^token_type))) {
+        constexpr std::string_view name = std::meta::identifier_of(enumerator);
+        if constexpr (name.starts_with("K_")) {
+            if (reflect::matches_keyword(key, name)) {
+                return [:enumerator:];
+            }
+        }
     }
-    else {
-        return token_type::IDENTIFIER;
-    }
+    return token_type::IDENTIFIER;
 }
 
 std::optional<Token> match_char_str(Reader &reader) {
@@ -165,8 +166,8 @@ bool is_punctuarter(char ch) {
     return is_one_of<"{}#;()">(ch);
 }
 
-bool is_operator(char ch) {
-    return is_one_of<"+-*/%">(ch);
+bool is_operator(Reader &reader) {
+    return is_one_of<"+-*/%<>">(ch);
 }
 
 std::optional<Token> match_punctuarter(Reader &reader) {
@@ -179,7 +180,7 @@ std::optional<Token> match_punctuarter(Reader &reader) {
 
 std::optional<Token> match_operator(Reader &reader) {
     Reader begin = reader;
-    if (is_punctuarter(reader.next_char())) {
+    while (is_operator(reader.next_char())) {
         if (reader.peek_next() == '/') {
             reader.next_char();
             while (reader.peek_next() != '\n') {

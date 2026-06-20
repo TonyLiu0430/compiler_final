@@ -1,5 +1,9 @@
 #pragma once
 
+#include <meta>
+#include <memory>
+#include <vector>
+
 #include "lexer/lexer.hpp"
 
 namespace c9ay::parser {
@@ -50,6 +54,7 @@ struct Statement : Node {
     static std::unique_ptr<Node> match(lexer::Lexer&) {
         return nullptr;
     }
+
     struct Panic_sync {
         static bool is_sync_token(lexer::Token tok) {
             if (tok.match<lexer::token_type::PUNCTUATOR>('}') || tok.match<lexer::token_type::PUNCTUATOR>(';')) {
@@ -60,41 +65,25 @@ struct Statement : Node {
     };
 };
 
-struct If_statement : Statement {};
-struct While_statement : Statement {};
+struct If_statement : Statement {
+    static constexpr lexer::token_type start = lexer::token_type::K_IF;
 
-struct Program : Node {
     static std::unique_ptr<Node> match(lexer::Lexer&) {
         return nullptr;
     }
 };
 
-struct Block : Node {
-    static std::unique_ptr<Node> match(lexer::Lexer& lexer) {
-        Block cur;
-        lexer::Token token = lexer.next_token();
-        if (token.match<lexer::token_type::PUNCTUATOR>('{')) {
-        }
-        bool success = false;
-        while (lexer.has_next()) {
-            lexer::Token next_token = lexer.peek_next();
-            if (next_token.match<lexer::token_type::K_IF>()) {
-                cur.children.push_back(If_statement::match(lexer));
-            }
-            else if (next_token.match<lexer::token_type::K_WHILE>()) {
-                cur.children.push_back(While_statement::match(lexer));
-            }
-            else if (next_token.match<lexer::token_type::PUNCTUATOR>('}')) {
-                lexer.next_token();
-                success = true;
-                break;
-            }
-        }
-        if (!success) {
-            lexer.report_error("block not close");
-            return nullptr;
-        }
-        return std::make_unique<Block>(cur);
+struct While_statement : Statement {
+    static constexpr lexer::token_type start = lexer::token_type::K_WHILE;
+
+    static std::unique_ptr<Node> match(lexer::Lexer&) {
+        return nullptr;
+    }
+};
+
+struct Program : Node {
+    static std::unique_ptr<Node> match(lexer::Lexer&) {
+        return nullptr;
     }
 };
 
@@ -127,9 +116,119 @@ struct Declvariable : Statement {
         if (!token.match<lexer::token_type::IDENTIFIER>()) {
             lexer.report_error("varible declaration expect a identifier");
             lexer.panic_recovery<Declvariable>();
-            return;
+            return nullptr;
         }
-    };
+        cur.varible_name = token;
+        return std::make_unique<Declvariable>(std::move(cur));
+    }
+};
+
+consteval bool has_ll1_start(std::meta::info type) {
+    for (auto member : std::meta::members_of(
+             type, std::meta::access_context::current())) {
+        if (std::meta::is_variable(member) &&
+            std::meta::is_static_member(member) &&
+            std::meta::has_identifier(member) &&
+            std::meta::identifier_of(member) == "start") {
+            return true;
+        }
+    }
+    return false;
+}
+
+consteval auto ll1_statement_types() {
+    std::vector<std::meta::info> result;
+
+    for (auto member : std::meta::members_of(^^c9ay::parser, std::meta::access_context::current())) {
+        if (std::meta::is_type(member) && std::meta::is_base_of_type(^^Statement, member) &&
+            !std::meta::is_same_type(^^Statement, member) &&
+            has_ll1_start(member)) {
+            result.push_back(member);
+        }
+    }
+
+    return std::define_static_array(result);
+}
+
+struct Statement_dispatch_result {
+    bool recognized = false;
+    std::unique_ptr<Node> node;
+};
+
+inline Statement_dispatch_result dispatch_statement(lexer::Lexer& lexer) {
+    const lexer::Token token = lexer.peek_next();
+    Statement_dispatch_result result;
+
+    template for (constexpr auto type : ll1_statement_types()) {
+        bool matches_type = false;
+
+        template for (constexpr auto member :
+                      std::define_static_array(std::meta::members_of(
+                          type, std::meta::access_context::current()))) {
+            if constexpr (std::meta::is_variable(member) &&
+                          std::meta::is_static_member(member) &&
+                          std::meta::has_identifier(member)) {
+                if constexpr (std::meta::identifier_of(member) == "start") {
+                    if (!result.recognized && token.type == [:member:]) {
+                        result.recognized = true;
+                        matches_type = true;
+                    }
+                }
+            }
+        }
+
+        if (matches_type) {
+            template for (constexpr auto member :
+                          std::define_static_array(std::meta::members_of(
+                              type, std::meta::access_context::current()))) {
+                if constexpr (std::meta::is_function(member) &&
+                              std::meta::has_identifier(member)) {
+                    if constexpr (std::meta::identifier_of(member) == "match") {
+                        result.node = [:member:](lexer);
+                    }
+                }
+            }
+        }
+    }
+
+    return result;
+}
+
+struct Block : Node {
+    static std::unique_ptr<Node> match(lexer::Lexer& lexer) {
+        Block cur;
+
+        if (!lexer.next_token().match<lexer::token_type::PUNCTUATOR>('{')) {
+            lexer.report_error("block expect '{'");
+            return nullptr;
+        }
+
+        while (lexer.has_next()) {
+            if (lexer.peek_next().match<lexer::token_type::PUNCTUATOR>('}')) {
+                lexer.next_token();
+                return std::make_unique<Block>(std::move(cur));
+            }
+
+            auto dispatched = dispatch_statement(lexer);
+            if (!dispatched.recognized) {
+                lexer.report_error("unexpected token in block");
+                lexer.next_token();
+                continue;
+            }
+
+            if (dispatched.node) {
+                cur.children.push_back(std::move(dispatched.node));
+            }
+            else {
+                // A recognized parser failed. Consume one token so an
+                // incomplete parser cannot make this loop stall forever.
+                lexer.next_token();
+            }
+        }
+
+        lexer.report_error("block not close");
+        return nullptr;
+    }
 };
 
 }  // namespace c9ay::parser
