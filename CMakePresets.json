@@ -21,7 +21,17 @@
         "CMAKE_CXX_COMPILER": "C:/dev/winlibs-x86_64-posix-seh-gcc-16.0.1-snapshot20260222-mingw-w64ucrt-13.0.0-r1/mingw64/bin/g++.exe",
         "CMAKE_MAKE_PROGRAM": "C:/dev/winlibs-x86_64-posix-seh-gcc-16.0.1-snapshot20260222-mingw-w64ucrt-13.0.0-r1/mingw64/bin/mingw32-make.exe",
         "Python3_EXECUTABLE": "${sourceDir}/.tools/python/cpython-3.13.9-windows-x86_64-none/python.exe",
+        "C9AY_LLVM_DIR": "${sourceDir}/build/gcc16-cxx26/llvm/lib/cmake/llvm",
+        "C9AY_BUILD_LLVM": "OFF",
         "ENABLE_EXPERIMENTAL_REFLECTION": "ON"
+      }
+    },
+    {
+      "name": "gcc16-cxx26-llvm",
+      "displayName": "Bootstrap LLVM X86 backend",
+      "inherits": "gcc16-cxx26",
+      "cacheVariables": {
+        "C9AY_BUILD_LLVM": "ON"
       }
     }
   ],
@@ -34,6 +44,18 @@
         "PATH": "C:/dev/winlibs-x86_64-posix-seh-gcc-16.0.1-snapshot20260222-mingw-w64ucrt-13.0.0-r1/mingw64/bin;$penv{PATH}"
       },
       "jobs": 8
+    },
+    {
+      "name": "gcc16-cxx26-llvm",
+      "displayName": "Build LLVM X86 backend once",
+      "configurePreset": "gcc16-cxx26-llvm",
+      "environment": {
+        "PATH": "C:/dev/winlibs-x86_64-posix-seh-gcc-16.0.1-snapshot20260222-mingw-w64ucrt-13.0.0-r1/mingw64/bin;$penv{PATH}"
+      },
+      "targets": [
+        "LLVMX86CodeGen"
+      ],
+      "jobs": 2
     }
   ]
 }

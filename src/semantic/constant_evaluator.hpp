@@ -4,13 +4,15 @@
 #include <string_view>
 
 #include "base/constant_value.hpp"
-#include "parser/expression.h"
+#include "base/literal.hpp"
+#include "parser/reflect_dispatch.hpp"
 
 namespace c9ay::semantic {
 
 class Constant_evaluator {
-    static std::optional<constant::Integer_value> parse_number(
-        std::string_view raw) {
+    using Result = std::optional<constant::Integer_value>;
+
+    static Result parse_number(std::string_view raw) {
         long long value = 0;
         for (char ch : raw) {
             if (ch < '0' || ch > '9') return std::nullopt;
@@ -19,87 +21,70 @@ class Constant_evaluator {
         return constant::Integer_value{value};
     }
 
-    static std::optional<constant::Integer_value> parse_character(
-        std::string_view raw) {
-        if (raw.size() < 3 || raw.front() != '\'' || raw.back() != '\'') {
-            return std::nullopt;
-        }
-        if (raw[1] != '\\') {
-            if (raw.size() != 3) return std::nullopt;
-            return constant::Integer_value{
-                static_cast<unsigned char>(raw[1])
-            };
-        }
-        if (raw.size() != 4) return std::nullopt;
-
-        if (raw[2] == 'n') return constant::Integer_value{'\n'};
-        if (raw[2] == 't') return constant::Integer_value{'\t'};
-        if (raw[2] == 'f') return constant::Integer_value{'\f'};
-        if (raw[2] == '\'') return constant::Integer_value{'\''};
-        if (raw[2] == '"') return constant::Integer_value{'"'};
-        if (raw[2] == '\\') return constant::Integer_value{'\\'};
-        return std::nullopt;
+    static Result parse_character(std::string_view raw) {
+        auto value = literal::decode_character(raw);
+        if (!value) return std::nullopt;
+        return constant::Integer_value{*value};
     }
 
 public:
-    static std::optional<constant::Integer_value> evaluate(
-        const parser::Expression &expression) {
-        if (expression.error_occur) return std::nullopt;
-
-        if (auto primary =
-                dynamic_cast<const parser::Primary_expression *>(&expression)) {
-            if (primary->token.type == lexer::token_type::NUMBER) {
-                return parse_number(primary->token.raw);
-            }
-            if (primary->token.type == lexer::token_type::CHAR_CONSTANT) {
-                return parse_character(primary->token.raw);
-            }
-            return std::nullopt;
+    Result operator()(const parser::Primary_expression &expression) {
+        if (expression.token.type == lexer::token_type::NUMBER) {
+            return parse_number(expression.token.raw);
         }
-
-        if (auto prefix =
-                dynamic_cast<const parser::Prefix_expression *>(&expression)) {
-            auto operand = evaluate(*prefix->operand);
-            if (!operand) return std::nullopt;
-            return constant::evaluate_prefix(prefix->op.raw, *operand);
+        if (expression.token.type == lexer::token_type::CHAR_CONSTANT) {
+            return parse_character(expression.token.raw);
         }
-
-        if (auto binary =
-                dynamic_cast<const parser::Binary_expression *>(&expression)) {
-            auto lhs = evaluate(*binary->lhs);
-            if (!lhs) return std::nullopt;
-
-            if (binary->op.raw == "&&" && lhs->value == 0) {
-                return constant::Integer_value{0};
-            }
-            if (binary->op.raw == "||" && lhs->value != 0) {
-                return constant::Integer_value{1};
-            }
-
-            auto rhs = evaluate(*binary->rhs);
-            if (!rhs) return std::nullopt;
-            return constant::evaluate_binary(
-                binary->op.raw,
-                *lhs,
-                *rhs);
-        }
-
-        if (auto conditional =
-                dynamic_cast<const parser::Conditional_expression *>(
-                    &expression)) {
-            auto condition = evaluate(*conditional->condition);
-            if (!condition) return std::nullopt;
-            return condition->value
-                ? evaluate(*conditional->true_expression)
-                : evaluate(*conditional->false_expression);
-        }
-
-        if (auto cast =
-                dynamic_cast<const parser::Cast_expression *>(&expression)) {
-            return evaluate(*cast->operand);
-        }
-
         return std::nullopt;
+    }
+
+    Result operator()(const parser::Prefix_expression &expression) {
+        auto operand = evaluate(*expression.operand);
+        if (!operand) return std::nullopt;
+        return constant::evaluate_prefix(expression.op.raw, *operand);
+    }
+
+    Result operator()(const parser::Binary_expression &expression) {
+        auto lhs = evaluate(*expression.lhs);
+        if (!lhs) return std::nullopt;
+
+        if (expression.op.raw == "&&" && lhs->value == 0) {
+            return constant::Integer_value{0};
+        }
+        if (expression.op.raw == "||" && lhs->value != 0) {
+            return constant::Integer_value{1};
+        }
+
+        auto rhs = evaluate(*expression.rhs);
+        if (!rhs) return std::nullopt;
+        return constant::evaluate_binary(
+            expression.op.raw,
+            *lhs,
+            *rhs);
+    }
+
+    Result operator()(const parser::Conditional_expression &expression) {
+        auto condition = evaluate(*expression.condition);
+        if (!condition) return std::nullopt;
+        return condition->value
+            ? evaluate(*expression.true_expression)
+            : evaluate(*expression.false_expression);
+    }
+
+    Result operator()(const parser::Cast_expression &expression) {
+        return evaluate(*expression.operand);
+    }
+
+    Result operator()(const parser::Expression &) {
+        return std::nullopt;
+    }
+
+    static Result evaluate(const parser::Expression &expression) {
+        if (expression.error_occur) return std::nullopt;
+        Constant_evaluator evaluator;
+        return parser::reflect::dispatch<Result>(
+            expression,
+            evaluator);
     }
 };
 

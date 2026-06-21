@@ -18,6 +18,7 @@ namespace c9ay::preprocessor {
 
 struct Macro {
     bool function_like = false;
+    bool variadic = false;
     std::vector<std::string> parameters;
     std::string replacement;
 };
@@ -135,32 +136,112 @@ class Preprocessor {
 
     static std::string substitute_parameters(
         const Macro &macro,
-        const std::vector<std::string> &arguments) {
+        const std::vector<std::string> &raw_arguments,
+        const std::vector<std::string> &expanded_arguments) {
         std::unordered_map<std::string_view, std::string_view> values;
+        std::unordered_map<std::string_view, std::string_view> raw_values;
         for (int i = 0; i < static_cast<int>(macro.parameters.size()); i++) {
-            values[macro.parameters[i]] = arguments[i];
+            values[macro.parameters[i]] = expanded_arguments[i];
+            raw_values[macro.parameters[i]] = raw_arguments[i];
         }
+
+        auto stringify = [](std::string_view argument) {
+            std::string value = "\"";
+            bool pending_space = false;
+            for (char ch : trim(argument)) {
+                if (std::isspace(static_cast<unsigned char>(ch))) {
+                    pending_space = true;
+                    continue;
+                }
+                if (pending_space && value.size() != 1) {
+                    value.push_back(' ');
+                }
+                pending_space = false;
+                if (ch == '\\' || ch == '"') value.push_back('\\');
+                value.push_back(ch);
+            }
+            value.push_back('"');
+            return value;
+        };
+
+        auto trim_result_right = [](std::string &value) {
+            while (!value.empty() &&
+                   std::isspace(
+                       static_cast<unsigned char>(value.back()))) {
+                value.pop_back();
+            }
+        };
 
         std::string result;
         std::string_view text = macro.replacement;
         int cnt = 0;
+        bool paste = false;
         while (1) {
             auto token = scanner::next_token(text, cnt);
             if (token.type == scanner::token_type::END) {
                 break;
             }
-            if (token.type != scanner::token_type::IDENTIFIER) {
-                result.append(token.raw);
+
+            if (token.type == scanner::token_type::PUNCTUATOR &&
+                token.raw == "#") {
+                int probe = cnt;
+                auto parameter = next_non_trivia(text, probe);
+                auto found = raw_values.find(parameter.raw);
+                if (parameter.type == scanner::token_type::IDENTIFIER &&
+                    found != raw_values.end()) {
+                    result += stringify(found->second);
+                    cnt = probe;
+                    continue;
+                }
+            }
+
+            if (token.type == scanner::token_type::PUNCTUATOR &&
+                token.raw == "##") {
+                trim_result_right(result);
+                paste = true;
                 continue;
             }
 
-            auto found = values.find(token.raw);
-            if (found == values.end()) {
+            if (paste &&
+                (token.type == scanner::token_type::WHITESPACE ||
+                 token.type == scanner::token_type::COMMENT)) {
+                continue;
+            }
+
+            if (token.type != scanner::token_type::IDENTIFIER) {
+                result.append(token.raw);
+                paste = false;
+                continue;
+            }
+
+            int probe = cnt;
+            auto next = next_non_trivia(text, probe);
+            bool before_paste =
+                next.type == scanner::token_type::PUNCTUATOR &&
+                next.raw == "##";
+            std::string_view replacement;
+            bool has_replacement = false;
+            if (paste || before_paste) {
+                auto found = raw_values.find(token.raw);
+                if (found != raw_values.end()) {
+                    replacement = found->second;
+                    has_replacement = true;
+                }
+            }
+            else {
+                auto found = values.find(token.raw);
+                if (found != values.end()) {
+                    replacement = found->second;
+                    has_replacement = true;
+                }
+            }
+            if (!has_replacement) {
                 result.append(token.raw);
             }
             else {
-                result.append(found->second);
+                result.append(replacement);
             }
+            paste = false;
         }
         return result;
     }
@@ -211,17 +292,43 @@ class Preprocessor {
 
             auto [arguments, end] =
                 parse_arguments(text, open.left);
+            if (arguments.empty() &&
+                !macro.parameters.empty()) {
+                arguments.emplace_back();
+            }
+            int fixed_parameters =
+                static_cast<int>(macro.parameters.size()) -
+                (macro.variadic ? 1 : 0);
             if (end == -1 ||
-                arguments.size() != macro.parameters.size()) {
+                (!macro.variadic &&
+                 arguments.size() != macro.parameters.size()) ||
+                (macro.variadic &&
+                 static_cast<int>(arguments.size()) < fixed_parameters)) {
                 result.append(name);
                 continue;
             }
 
+            if (macro.variadic) {
+                std::string variadic;
+                for (int i = fixed_parameters;
+                     i < static_cast<int>(arguments.size());
+                     i++) {
+                    if (!variadic.empty()) variadic += ", ";
+                    variadic += arguments[i];
+                }
+                arguments.resize(fixed_parameters);
+                arguments.push_back(std::move(variadic));
+            }
+
+            auto raw_arguments = arguments;
             for (auto &argument : arguments) {
                 argument = expand_text(argument);
             }
             std::string replacement =
-                substitute_parameters(macro, arguments);
+                substitute_parameters(
+                    macro,
+                    raw_arguments,
+                    arguments);
             result += expand_text(replacement, std::move(next_disabled));
             cnt = end;
         }
@@ -274,10 +381,29 @@ class Preprocessor {
         return result;
     }
 
+    static std::string replace_condition_identifiers(
+        std::string_view expression) {
+        std::string result;
+        int cnt = 0;
+        while (1) {
+            auto token = scanner::next_token(expression, cnt);
+            if (token.type == scanner::token_type::END) break;
+            if (token.type == scanner::token_type::IDENTIFIER) {
+                result.push_back('0');
+            }
+            else {
+                result.append(token.raw);
+            }
+        }
+        return result;
+    }
+
     bool evaluate_condition(std::string_view expression) {
         std::string replaced = replace_defined(expression);
         std::string expanded = expand_text(replaced);
-        auto value = Constant_expression(expanded).evaluate();
+        std::string normalized =
+            replace_condition_identifiers(expanded);
+        auto value = Constant_expression(normalized).evaluate();
         return value && value->value != 0;
     }
 
@@ -306,6 +432,19 @@ class Preprocessor {
             }
 
             while (1) {
+                if (parameter.type == scanner::token_type::PUNCTUATOR &&
+                    parameter.raw == "...") {
+                    macro.variadic = true;
+                    macro.parameters.emplace_back("__VA_ARGS__");
+                    auto close = next_non_trivia(body, cnt);
+                    if (close.type != scanner::token_type::PUNCTUATOR ||
+                        close.raw != ")") {
+                        return;
+                    }
+                    macro.replacement =
+                        std::string(trim_left(body.substr(close.right)));
+                    break;
+                }
                 if (parameter.type != scanner::token_type::IDENTIFIER) {
                     return;
                 }

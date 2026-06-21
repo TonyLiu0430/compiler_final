@@ -1,5 +1,6 @@
 #pragma once
 
+#include <filesystem>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -20,7 +21,9 @@
 #include <llvm/IR/Verifier.h>
 #include <llvm/Support/raw_ostream.h>
 
+#include "base/literal.hpp"
 #include "parser/parser.h"
+#include "codegen/llvm_target.hpp"
 #include "semantic/constant_evaluator.hpp"
 #include "semantic/semantic_analyzer.hpp"
 
@@ -37,7 +40,10 @@ class LLVM_codegen {
     llvm::IRBuilder<> builder;
     std::vector<std::unordered_map<std::string, llvm::Value *>> scopes;
     std::vector<Loop_target> loops;
+    std::vector<llvm::BasicBlock *> break_targets;
     llvm::Function *current_function = nullptr;
+    semantic::Type_ptr current_return_type;
+    semantic::Semantic_result semantic_result;
 
     [[noreturn]] static void unsupported(std::string_view message) {
         throw std::runtime_error(
@@ -57,10 +63,45 @@ class LLVM_codegen {
                 "type " + std::string(type.raw));
         }
 
-        if (pointer_depth != 0) {
-            unsupported("pointer type");
+        for (int i = 0; i < pointer_depth; i++) {
+            result = llvm::PointerType::get(context, 0);
         }
         return result;
+    }
+
+    llvm::Type *type_of(const semantic::Type_ptr &type) {
+        using Kind = semantic::Type::Kind;
+        if (type->kind == Kind::VOID_TYPE) {
+            return llvm::Type::getVoidTy(context);
+        }
+        if (type->kind == Kind::CHAR_TYPE) {
+            return llvm::Type::getInt8Ty(context);
+        }
+        if (type->kind == Kind::INT_TYPE) {
+            return llvm::Type::getInt32Ty(context);
+        }
+        if (type->kind == Kind::POINTER_TYPE) {
+            return llvm::PointerType::get(context, 0);
+        }
+        if (type->kind == Kind::ARRAY_TYPE) {
+            if (!type->array_size) {
+                unsupported("incomplete array type");
+            }
+            return llvm::ArrayType::get(
+                type_of(type->element),
+                *type->array_size);
+        }
+        if (type->kind == Kind::FUNCTION_TYPE) {
+            std::vector<llvm::Type *> parameters;
+            for (auto &parameter : type->parameters) {
+                parameters.push_back(type_of(parameter));
+            }
+            return llvm::FunctionType::get(
+                type_of(type->return_type),
+                parameters,
+                false);
+        }
+        unsupported("semantic type");
     }
 
     llvm::Value *integer(long long value) {
@@ -88,7 +129,103 @@ class LLVM_codegen {
         unsupported("non-integer expression");
     }
 
+    llvm::Value *convert(
+        llvm::Value *value,
+        const semantic::Type_ptr &target) {
+        if (!value) unsupported("void value used as expression");
+        auto target_type = type_of(target);
+        if (value->getType() == target_type) return value;
+
+        if (target->is_integer() &&
+            value->getType()->isIntegerTy()) {
+            return builder.CreateIntCast(
+                value,
+                target_type,
+                true,
+                "integer.conversion");
+        }
+        if (target->kind == semantic::Type::Kind::POINTER_TYPE &&
+            value->getType()->isIntegerTy()) {
+            return builder.CreateIntToPtr(
+                value,
+                target_type,
+                "pointer.conversion");
+        }
+        if (target->is_integer() &&
+            value->getType()->isPointerTy()) {
+            return builder.CreatePtrToInt(
+                value,
+                target_type,
+                "integer.conversion");
+        }
+        if (target->kind == semantic::Type::Kind::POINTER_TYPE &&
+            value->getType()->isPointerTy()) {
+            return value;
+        }
+        unsupported("type conversion");
+    }
+
+    llvm::Constant *string_initializer(
+        const semantic::Type_ptr &type,
+        std::string_view raw) {
+        auto value = literal::decode_string(raw);
+        if (!value ||
+            type->kind != semantic::Type::Kind::ARRAY_TYPE ||
+            type->element->kind != semantic::Type::Kind::CHAR_TYPE ||
+            !type->array_size) {
+            unsupported("string initializer");
+        }
+
+        std::vector<llvm::Constant *> elements;
+        for (int i = 0; i < static_cast<int>(*type->array_size); i++) {
+            unsigned char ch = 0;
+            if (i < static_cast<int>(value->size())) {
+                ch = static_cast<unsigned char>((*value)[i]);
+            }
+            elements.push_back(llvm::ConstantInt::get(
+                llvm::Type::getInt8Ty(context),
+                ch));
+        }
+        return llvm::ConstantArray::get(
+            llvm::cast<llvm::ArrayType>(type_of(type)),
+            elements);
+    }
+
+    llvm::Constant *string_pointer(std::string_view raw) {
+        auto value = literal::decode_string(raw);
+        if (!value) unsupported("string literal");
+
+        auto data = llvm::ConstantDataArray::getString(
+            context,
+            *value,
+            true);
+        auto global = new llvm::GlobalVariable(
+            *module,
+            data->getType(),
+            true,
+            llvm::GlobalValue::PrivateLinkage,
+            data,
+            "string");
+        global->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+
+        llvm::Constant *zero = llvm::ConstantInt::get(
+            llvm::Type::getInt32Ty(context),
+            0);
+        std::vector<llvm::Constant *> indices = {zero, zero};
+        return llvm::ConstantExpr::getInBoundsGetElementPtr(
+            data->getType(),
+            global,
+            indices);
+    }
+
     llvm::Value *as_condition(llvm::Value *value) {
+        if (value->getType()->isPointerTy()) {
+            return builder.CreateICmpNE(
+                value,
+                llvm::ConstantPointerNull::get(
+                    llvm::cast<llvm::PointerType>(value->getType())),
+                "condition");
+        }
         value = as_i32(value);
         return builder.CreateICmpNE(value, integer(0), "condition");
     }
@@ -137,6 +274,26 @@ class LLVM_codegen {
     }
 
     llvm::Value *lvalue(const parser::Expression &expression) {
+        if (auto prefix =
+                dynamic_cast<const parser::Prefix_expression *>(&expression)) {
+            if (prefix->op.raw == "*") {
+                return this->expression(*prefix->operand);
+            }
+        }
+
+        if (auto subscript =
+                dynamic_cast<const parser::Subscript_expression *>(&expression)) {
+            auto object = this->expression(*subscript->object);
+            auto index = as_i32(this->expression(*subscript->index));
+            auto element_type =
+                semantic_result.info(expression).type;
+            return builder.CreateGEP(
+                type_of(element_type),
+                object,
+                index,
+                "subscript.address");
+        }
+
         auto primary =
             dynamic_cast<const parser::Primary_expression *>(&expression);
         if (!primary ||
@@ -155,30 +312,13 @@ class LLVM_codegen {
     llvm::Function *declare_function(
         const parser::Declaration_specifiers &specifiers,
         const parser::Declarator &declarator) {
-        if (declarator.pointer_depth != 0 ||
-            !declarator.array_dimensions.empty()) {
-            unsupported("function pointer or array return type");
+        auto symbol = semantic_result.symbol(declarator);
+        if (!symbol ||
+            symbol->type->kind != semantic::Type::Kind::FUNCTION_TYPE) {
+            unsupported("function semantic type");
         }
-
-        std::vector<llvm::Type *> parameters;
-        bool void_parameter_list =
-            declarator.parameters.size() == 1 &&
-            declarator.parameters[0]->specifiers.type.raw == "void" &&
-            !declarator.parameters[0]->declarator;
-        for (auto &parameter : declarator.parameters) {
-            if (void_parameter_list) break;
-            int pointer_depth =
-                parameter->declarator
-                    ? parameter->declarator->pointer_depth
-                    : 0;
-            parameters.push_back(
-                type_of(parameter->specifiers.type, pointer_depth));
-        }
-
-        auto function_type = llvm::FunctionType::get(
-            type_of(specifiers.type),
-            parameters,
-            false);
+        auto function_type = llvm::cast<llvm::FunctionType>(
+            type_of(symbol->type));
         auto name = llvm::StringRef(
             declarator.name.raw.data(),
             declarator.name.raw.size());
@@ -210,6 +350,10 @@ class LLVM_codegen {
                 return integer(value->value);
             }
 
+            if (primary->token.type == lexer::token_type::STRING_CONSTANT) {
+                return string_pointer(primary->token.raw);
+            }
+
             if (primary->token.type == lexer::token_type::IDENTIFIER) {
                 auto address = find_address(primary->token.raw);
                 if (!address) {
@@ -235,6 +379,15 @@ class LLVM_codegen {
                     type = global->getValueType();
                 }
                 if (!type || !pointer) unsupported("identifier load");
+                auto semantic_type = semantic_result.info(node).type;
+                if (semantic_type->kind ==
+                    semantic::Type::Kind::ARRAY_TYPE) {
+                    return builder.CreateInBoundsGEP(
+                        type,
+                        address,
+                        {integer(0), integer(0)},
+                        "array.decay");
+                }
                 return builder.CreateLoad(
                     type,
                     address,
@@ -250,11 +403,45 @@ class LLVM_codegen {
             if (prefix->op.raw == "++" || prefix->op.raw == "--") {
                 auto address = lvalue(*prefix->operand);
                 auto old = expression(*prefix->operand);
-                auto value = prefix->op.raw == "++"
-                    ? builder.CreateAdd(as_i32(old), integer(1), "increment")
-                    : builder.CreateSub(as_i32(old), integer(1), "decrement");
+                auto type = semantic_result.info(*prefix->operand).type;
+                llvm::Value *value = nullptr;
+                if (type->kind == semantic::Type::Kind::POINTER_TYPE) {
+                    auto index = prefix->op.raw == "++"
+                        ? integer(1)
+                        : integer(-1);
+                    value = builder.CreateGEP(
+                        type_of(type->element),
+                        old,
+                        index,
+                        "pointer.increment");
+                }
+                else {
+                    value = prefix->op.raw == "++"
+                        ? builder.CreateAdd(as_i32(old), integer(1), "increment")
+                        : builder.CreateSub(as_i32(old), integer(1), "decrement");
+                    value = convert(value, type);
+                }
                 builder.CreateStore(value, address);
                 return value;
+            }
+
+            if (prefix->op.raw == "&") {
+                return lvalue(*prefix->operand);
+            }
+            if (prefix->op.raw == "*") {
+                auto address = lvalue(node);
+                auto type = semantic_result.info(node).type;
+                if (type->kind == semantic::Type::Kind::ARRAY_TYPE) {
+                    return builder.CreateInBoundsGEP(
+                        type_of(type),
+                        address,
+                        {integer(0), integer(0)},
+                        "array.decay");
+                }
+                return builder.CreateLoad(
+                    type_of(type),
+                    address,
+                    "dereference");
             }
 
             auto operand = as_i32(expression(*prefix->operand));
@@ -270,16 +457,31 @@ class LLVM_codegen {
             if (prefix->op.raw == "~") {
                 return builder.CreateNot(operand, "bit_not");
             }
-            unsupported("prefix pointer operator");
+            unsupported("prefix operator");
         }
 
         if (auto postfix =
                 dynamic_cast<const parser::Postfix_expression *>(&node)) {
             auto address = lvalue(*postfix->operand);
-            auto old = as_i32(expression(*postfix->operand));
-            auto value = postfix->op.raw == "++"
-                ? builder.CreateAdd(old, integer(1), "increment")
-                : builder.CreateSub(old, integer(1), "decrement");
+            auto old = expression(*postfix->operand);
+            auto type = semantic_result.info(*postfix->operand).type;
+            llvm::Value *value = nullptr;
+            if (type->kind == semantic::Type::Kind::POINTER_TYPE) {
+                auto index = postfix->op.raw == "++"
+                    ? integer(1)
+                    : integer(-1);
+                value = builder.CreateGEP(
+                    type_of(type->element),
+                    old,
+                    index,
+                    "pointer.increment");
+            }
+            else {
+                value = postfix->op.raw == "++"
+                    ? builder.CreateAdd(as_i32(old), integer(1), "increment")
+                    : builder.CreateSub(as_i32(old), integer(1), "decrement");
+                value = convert(value, type);
+            }
             builder.CreateStore(value, address);
             return old;
         }
@@ -293,21 +495,43 @@ class LLVM_codegen {
                 op == "<<=" || op == ">>=" ||
                 op == "&=" || op == "^=" || op == "|=") {
                 auto address = lvalue(*binary->lhs);
-                auto rhs = as_i32(expression(*binary->rhs));
-                if (op != "=") {
-                    auto lhs = as_i32(expression(*binary->lhs));
-                    std::string_view base = op.substr(0, op.size() - 1);
-                    if (base == "+") rhs = builder.CreateAdd(lhs, rhs);
-                    else if (base == "-") rhs = builder.CreateSub(lhs, rhs);
-                    else if (base == "*") rhs = builder.CreateMul(lhs, rhs);
-                    else if (base == "/") rhs = builder.CreateSDiv(lhs, rhs);
-                    else if (base == "%") rhs = builder.CreateSRem(lhs, rhs);
-                    else if (base == "<<") rhs = builder.CreateShl(lhs, rhs);
-                    else if (base == ">>") rhs = builder.CreateAShr(lhs, rhs);
-                    else if (base == "&") rhs = builder.CreateAnd(lhs, rhs);
-                    else if (base == "^") rhs = builder.CreateXor(lhs, rhs);
-                    else if (base == "|") rhs = builder.CreateOr(lhs, rhs);
+                auto lhs_semantic_type =
+                    semantic_result.info(*binary->lhs).type;
+                auto rhs = expression(*binary->rhs);
+                if (op == "=") {
+                    rhs = convert(rhs, lhs_semantic_type);
                 }
+                else {
+                    auto lhs = expression(*binary->lhs);
+                    std::string_view base = op.substr(0, op.size() - 1);
+                    if ((base == "+" || base == "-") &&
+                        lhs_semantic_type->kind ==
+                            semantic::Type::Kind::POINTER_TYPE) {
+                        auto index = as_i32(rhs);
+                        if (base == "-") {
+                            index = builder.CreateNeg(index);
+                        }
+                        rhs = builder.CreateGEP(
+                            type_of(lhs_semantic_type->element),
+                            lhs,
+                            index);
+                    }
+                    else {
+                        lhs = as_i32(lhs);
+                        rhs = as_i32(rhs);
+                        if (base == "+") rhs = builder.CreateAdd(lhs, rhs);
+                        else if (base == "-") rhs = builder.CreateSub(lhs, rhs);
+                        else if (base == "*") rhs = builder.CreateMul(lhs, rhs);
+                        else if (base == "/") rhs = builder.CreateSDiv(lhs, rhs);
+                        else if (base == "%") rhs = builder.CreateSRem(lhs, rhs);
+                        else if (base == "<<") rhs = builder.CreateShl(lhs, rhs);
+                        else if (base == ">>") rhs = builder.CreateAShr(lhs, rhs);
+                        else if (base == "&") rhs = builder.CreateAnd(lhs, rhs);
+                        else if (base == "^") rhs = builder.CreateXor(lhs, rhs);
+                        else if (base == "|") rhs = builder.CreateOr(lhs, rhs);
+                    }
+                }
+                rhs = convert(rhs, lhs_semantic_type);
                 builder.CreateStore(rhs, address);
                 return rhs;
             }
@@ -356,6 +580,84 @@ class LLVM_codegen {
                 return as_i32(phi);
             }
 
+            auto lhs_type = semantic_result.info(*binary->lhs).type;
+            auto rhs_type = semantic_result.info(*binary->rhs).type;
+            if ((op == "+" || op == "-") &&
+                lhs_type->kind ==
+                    semantic::Type::Kind::POINTER_TYPE &&
+                rhs_type->is_integer()) {
+                auto pointer = expression(*binary->lhs);
+                auto index = as_i32(expression(*binary->rhs));
+                if (op == "-") {
+                    index = builder.CreateNeg(index, "negative.index");
+                }
+                return builder.CreateGEP(
+                    type_of(lhs_type->element),
+                    pointer,
+                    index,
+                    "pointer.offset");
+            }
+
+            if (op == "+" &&
+                lhs_type->is_integer() &&
+                rhs_type->kind ==
+                    semantic::Type::Kind::POINTER_TYPE) {
+                return builder.CreateGEP(
+                    type_of(rhs_type->element),
+                    expression(*binary->rhs),
+                    as_i32(expression(*binary->lhs)),
+                    "pointer.offset");
+            }
+
+            if (op == "-" &&
+                lhs_type->kind == semantic::Type::Kind::POINTER_TYPE &&
+                rhs_type->kind == semantic::Type::Kind::POINTER_TYPE) {
+                auto integer_type = llvm::Type::getInt64Ty(context);
+                auto lhs = builder.CreatePtrToInt(
+                    expression(*binary->lhs),
+                    integer_type);
+                auto rhs = builder.CreatePtrToInt(
+                    expression(*binary->rhs),
+                    integer_type);
+                auto bytes = builder.CreateSub(lhs, rhs, "pointer.bytes");
+                auto element_size = llvm::ConstantExpr::getSizeOf(
+                    type_of(lhs_type->element));
+                auto distance = builder.CreateSDiv(
+                    bytes,
+                    element_size,
+                    "pointer.distance");
+                return builder.CreateTrunc(
+                    distance,
+                    llvm::Type::getInt32Ty(context));
+            }
+
+            if ((op == "==" || op == "!=" ||
+                 op == "<" || op == "<=" ||
+                 op == ">" || op == ">=") &&
+                (lhs_type->kind == semantic::Type::Kind::POINTER_TYPE ||
+                 rhs_type->kind == semantic::Type::Kind::POINTER_TYPE)) {
+                auto lhs = expression(*binary->lhs);
+                auto rhs = expression(*binary->rhs);
+                if (lhs_type->kind ==
+                        semantic::Type::Kind::POINTER_TYPE &&
+                    rhs_type->is_integer()) {
+                    rhs = convert(rhs, lhs_type);
+                }
+                else if (rhs_type->kind ==
+                             semantic::Type::Kind::POINTER_TYPE &&
+                         lhs_type->is_integer()) {
+                    lhs = convert(lhs, rhs_type);
+                }
+                llvm::Value *comparison = nullptr;
+                if (op == "==") comparison = builder.CreateICmpEQ(lhs, rhs);
+                else if (op == "!=") comparison = builder.CreateICmpNE(lhs, rhs);
+                else if (op == "<") comparison = builder.CreateICmpULT(lhs, rhs);
+                else if (op == "<=") comparison = builder.CreateICmpULE(lhs, rhs);
+                else if (op == ">") comparison = builder.CreateICmpUGT(lhs, rhs);
+                else comparison = builder.CreateICmpUGE(lhs, rhs);
+                return as_i32(comparison);
+            }
+
             auto lhs = as_i32(expression(*binary->lhs));
             auto rhs = as_i32(expression(*binary->rhs));
             if (op == "+") return builder.CreateAdd(lhs, rhs, "add");
@@ -379,35 +681,46 @@ class LLVM_codegen {
 
         if (auto call =
                 dynamic_cast<const parser::Call_expression *>(&node)) {
-            auto callee_primary =
-                dynamic_cast<const parser::Primary_expression *>(
-                    call->callee.get());
-            if (!callee_primary) unsupported("indirect function call");
-
-            auto function = module->getFunction(
-                llvm::StringRef(
-                    callee_primary->token.raw.data(),
-                    callee_primary->token.raw.size()));
-            if (!function) {
-                throw std::runtime_error(
-                    "unknown function: " +
-                    std::string(callee_primary->token.raw));
+            auto callee_type =
+                semantic_result.info(*call->callee).type;
+            if (callee_type->kind ==
+                semantic::Type::Kind::POINTER_TYPE) {
+                callee_type = callee_type->element;
             }
-
-            if (call->arguments.size() != function->arg_size()) {
-                throw std::runtime_error(
-                    "wrong argument count: " +
-                    std::string(callee_primary->token.raw));
-            }
+            auto function_type = llvm::cast<llvm::FunctionType>(
+                type_of(callee_type));
+            auto callee = expression(*call->callee);
 
             std::vector<llvm::Value *> arguments;
+            int argument_index = 0;
             for (auto &argument : call->arguments) {
-                arguments.push_back(as_i32(expression(*argument)));
+                auto value = expression(*argument);
+                value = convert(
+                    value,
+                    callee_type->parameters[argument_index++]);
+                arguments.push_back(value);
             }
             return builder.CreateCall(
-                function,
+                function_type,
+                callee,
                 arguments,
-                function->getReturnType()->isVoidTy() ? "" : "call");
+                function_type->getReturnType()->isVoidTy() ? "" : "call");
+        }
+
+        if (dynamic_cast<const parser::Subscript_expression *>(&node)) {
+            auto address = lvalue(node);
+            auto type = semantic_result.info(node).type;
+            if (type->kind == semantic::Type::Kind::ARRAY_TYPE) {
+                return builder.CreateInBoundsGEP(
+                    type_of(type),
+                    address,
+                    {integer(0), integer(0)},
+                    "array.decay");
+            }
+            return builder.CreateLoad(
+                type_of(type),
+                address,
+                "subscript");
         }
 
         if (auto conditional =
@@ -431,20 +744,23 @@ class LLVM_codegen {
             builder.CreateCondBr(condition, true_block, false_block);
 
             builder.SetInsertPoint(true_block);
-            auto true_value = as_i32(
-                expression(*conditional->true_expression));
+            auto result_type = semantic_result.info(node).type;
+            auto true_value = convert(
+                expression(*conditional->true_expression),
+                result_type);
             true_block = builder.GetInsertBlock();
             builder.CreateBr(merge_block);
 
             builder.SetInsertPoint(false_block);
-            auto false_value = as_i32(
-                expression(*conditional->false_expression));
+            auto false_value = convert(
+                expression(*conditional->false_expression),
+                result_type);
             false_block = builder.GetInsertBlock();
             builder.CreateBr(merge_block);
 
             builder.SetInsertPoint(merge_block);
             auto phi = builder.CreatePHI(
-                llvm::Type::getInt32Ty(context),
+                type_of(result_type),
                 2,
                 "conditional");
             phi->addIncoming(true_value, true_block);
@@ -454,14 +770,94 @@ class LLVM_codegen {
 
         if (auto cast =
                 dynamic_cast<const parser::Cast_expression *>(&node)) {
-            if (cast->type->declarator &&
-                cast->type->declarator->pointer_depth != 0) {
-                unsupported("pointer cast");
+            auto value = expression(*cast->operand);
+            auto target = semantic_result.info(node).type;
+            auto source = semantic_result.info(*cast->operand).type;
+            if (target->kind == semantic::Type::Kind::POINTER_TYPE &&
+                source->is_integer()) {
+                return builder.CreateIntToPtr(
+                    as_i32(value),
+                    type_of(target),
+                    "pointer.cast");
             }
-            return as_i32(expression(*cast->operand));
+            if (target->is_integer() &&
+                source->kind == semantic::Type::Kind::POINTER_TYPE) {
+                return builder.CreatePtrToInt(
+                    value,
+                    type_of(target),
+                    "integer.cast");
+            }
+            if (target->kind == semantic::Type::Kind::POINTER_TYPE &&
+                source->kind == semantic::Type::Kind::POINTER_TYPE) {
+                return value;
+            }
+            return as_i32(value);
         }
 
         unsupported("expression node");
+    }
+
+    void store_initializer(
+        const parser::Initializer &initializer,
+        const semantic::Type_ptr &type,
+        llvm::Value *address) {
+        if (auto expression_initializer =
+                dynamic_cast<const parser::Expression_initializer *>(
+                    &initializer)) {
+            if (type->kind == semantic::Type::Kind::ARRAY_TYPE) {
+                auto primary =
+                    dynamic_cast<const parser::Primary_expression *>(
+                        expression_initializer->expression.get());
+                if (primary &&
+                    primary->token.type ==
+                        lexer::token_type::STRING_CONSTANT) {
+                    builder.CreateStore(
+                        string_initializer(type, primary->token.raw),
+                        address);
+                    return;
+                }
+            }
+
+            auto value = expression(*expression_initializer->expression);
+            value = convert(value, type);
+            builder.CreateStore(value, address);
+            return;
+        }
+
+        auto list = dynamic_cast<const parser::Initializer_list *>(
+            &initializer);
+        if (!list) {
+            unsupported("initializer");
+        }
+        if (type->kind != semantic::Type::Kind::ARRAY_TYPE) {
+            if (list->elements.empty()) {
+                builder.CreateStore(
+                    llvm::Constant::getNullValue(type_of(type)),
+                    address);
+            }
+            else {
+                store_initializer(
+                    *list->elements[0],
+                    type,
+                    address);
+            }
+            return;
+        }
+
+        builder.CreateStore(
+            llvm::Constant::getNullValue(type_of(type)),
+            address);
+        for (int i = 0; i < static_cast<int>(list->elements.size()); i++) {
+            auto element_address = builder.CreateInBoundsGEP(
+                type_of(type),
+                address,
+                {integer(0), integer(i)},
+                "initializer.element");
+            store_initializer(
+                *list->elements[i],
+                type->element,
+                element_address);
+        }
     }
 
     void declaration(const parser::Declvariable &node) {
@@ -469,13 +865,10 @@ class LLVM_codegen {
 
         for (auto &init_declarator : node.declarators) {
             auto &declarator = *init_declarator->declarator;
-            if (declarator.is_function) continue;
-            if (declarator.pointer_depth != 0 ||
-                !declarator.array_dimensions.empty()) {
-                unsupported("pointer or array variable");
-            }
-
-            llvm::Type *type = type_of(node.type);
+            auto symbol = semantic_result.symbol(declarator);
+            if (!symbol) unsupported("declaration symbol");
+            if (symbol->kind == semantic::Symbol::Kind::FUNCTION) continue;
+            llvm::Type *type = type_of(symbol->type);
             auto alloca = create_entry_alloca(
                 current_function,
                 type,
@@ -483,12 +876,9 @@ class LLVM_codegen {
             declare(declarator.name.raw, alloca);
 
             if (init_declarator->initializer) {
-                auto initializer =
-                    dynamic_cast<const parser::Expression_initializer *>(
-                        init_declarator->initializer.get());
-                if (!initializer) unsupported("initializer list");
-                builder.CreateStore(
-                    as_i32(expression(*initializer->expression)),
+                store_initializer(
+                    *init_declarator->initializer,
+                    symbol->type,
                     alloca);
             }
         }
@@ -528,7 +918,9 @@ class LLVM_codegen {
             else {
                 builder.CreateRet(
                     return_node->expression
-                        ? as_i32(expression(*return_node->expression))
+                        ? convert(
+                              expression(*return_node->expression),
+                              current_return_type)
                         : integer(0));
             }
             return;
@@ -576,6 +968,110 @@ class LLVM_codegen {
             return;
         }
 
+        if (auto switch_node =
+                dynamic_cast<const parser::Switch_statement *>(&node)) {
+            auto body = dynamic_cast<const parser::Block *>(
+                switch_node->body.get());
+            if (!body) unsupported("switch body without block");
+
+            auto end_block = llvm::BasicBlock::Create(
+                context,
+                "switch.end",
+                current_function);
+            auto default_block = end_block;
+            auto condition = as_i32(
+                expression(*switch_node->condition));
+            auto switch_instruction = builder.CreateSwitch(
+                condition,
+                end_block);
+
+            struct Segment {
+                llvm::BasicBlock *block;
+                const parser::Statement *first;
+                int next_index;
+            };
+            std::vector<Segment> segments;
+
+            for (int i = 0;
+                 i < static_cast<int>(body->statements.size());) {
+                const parser::Statement *label =
+                    body->statements[i].get();
+                if (!dynamic_cast<const parser::Case_statement *>(label) &&
+                    !dynamic_cast<const parser::Default_statement *>(label)) {
+                    unsupported("statement before first switch label");
+                }
+
+                auto block = llvm::BasicBlock::Create(
+                    context,
+                    "switch.case",
+                    current_function);
+                const parser::Statement *payload = label;
+
+                while (1) {
+                    if (auto case_statement =
+                            dynamic_cast<const parser::Case_statement *>(
+                                payload)) {
+                        auto value =
+                            semantic::Constant_evaluator::evaluate(
+                                *case_statement->value);
+                        switch_instruction->addCase(
+                            llvm::cast<llvm::ConstantInt>(
+                                integer(value->value)),
+                            block);
+                        payload = case_statement->statement.get();
+                        continue;
+                    }
+                    if (auto default_statement =
+                            dynamic_cast<const parser::Default_statement *>(
+                                payload)) {
+                        default_block = block;
+                        switch_instruction->setDefaultDest(block);
+                        payload = default_statement->statement.get();
+                        continue;
+                    }
+                    break;
+                }
+
+                int next = i + 1;
+                while (next < static_cast<int>(body->statements.size()) &&
+                       !dynamic_cast<const parser::Case_statement *>(
+                           body->statements[next].get()) &&
+                       !dynamic_cast<const parser::Default_statement *>(
+                           body->statements[next].get())) {
+                    next++;
+                }
+                segments.push_back({block, payload, next});
+                i = next;
+            }
+
+            switch_instruction->setDefaultDest(default_block);
+            break_targets.push_back(end_block);
+            for (int i = 0; i < static_cast<int>(segments.size()); i++) {
+                builder.SetInsertPoint(segments[i].block);
+                statement(*segments[i].first);
+
+                int begin = i == 0 ? 1 : segments[i - 1].next_index + 1;
+                int label_index =
+                    i == 0 ? 0 : segments[i - 1].next_index;
+                begin = label_index + 1;
+                for (int index = begin;
+                     index < segments[i].next_index;
+                     index++) {
+                    statement(*body->statements[index]);
+                }
+
+                if (!is_terminated(builder.GetInsertBlock())) {
+                    builder.CreateBr(
+                        i + 1 < static_cast<int>(segments.size())
+                            ? segments[i + 1].block
+                            : end_block);
+                }
+            }
+            break_targets.pop_back();
+            builder.SetInsertPoint(end_block);
+            return;
+        }
+
         if (auto while_node =
                 dynamic_cast<const parser::While_statement *>(&node)) {
             auto condition_block = llvm::BasicBlock::Create(
@@ -599,12 +1095,14 @@ class LLVM_codegen {
                 end_block);
 
             loops.push_back({end_block, condition_block});
+            break_targets.push_back(end_block);
             builder.SetInsertPoint(body_block);
             statement(*while_node->body);
             if (!is_terminated(builder.GetInsertBlock())) {
                 builder.CreateBr(condition_block);
             }
             loops.pop_back();
+            break_targets.pop_back();
 
             builder.SetInsertPoint(end_block);
             return;
@@ -627,12 +1125,14 @@ class LLVM_codegen {
 
             builder.CreateBr(body_block);
             loops.push_back({end_block, condition_block});
+            break_targets.push_back(end_block);
             builder.SetInsertPoint(body_block);
             statement(*do_node->body);
             if (!is_terminated(builder.GetInsertBlock())) {
                 builder.CreateBr(condition_block);
             }
             loops.pop_back();
+            break_targets.pop_back();
 
             builder.SetInsertPoint(condition_block);
             builder.CreateCondBr(
@@ -680,12 +1180,14 @@ class LLVM_codegen {
             }
 
             loops.push_back({end_block, iteration_block});
+            break_targets.push_back(end_block);
             builder.SetInsertPoint(body_block);
             statement(*for_node->body);
             if (!is_terminated(builder.GetInsertBlock())) {
                 builder.CreateBr(iteration_block);
             }
             loops.pop_back();
+            break_targets.pop_back();
 
             builder.SetInsertPoint(iteration_block);
             if (for_node->iteration) {
@@ -699,8 +1201,8 @@ class LLVM_codegen {
         }
 
         if (dynamic_cast<const parser::Break_statement *>(&node)) {
-            if (loops.empty()) unsupported("break outside loop");
-            builder.CreateBr(loops.back().break_target);
+            if (break_targets.empty()) unsupported("break outside loop or switch");
+            builder.CreateBr(break_targets.back());
             return;
         }
 
@@ -713,12 +1215,97 @@ class LLVM_codegen {
         unsupported("statement node");
     }
 
+    llvm::Constant *constant_initializer(
+        const parser::Initializer &initializer,
+        const semantic::Type_ptr &type) {
+        if (auto expression_initializer =
+                dynamic_cast<const parser::Expression_initializer *>(
+                    &initializer)) {
+            if (type->kind == semantic::Type::Kind::ARRAY_TYPE) {
+                auto primary =
+                    dynamic_cast<const parser::Primary_expression *>(
+                        expression_initializer->expression.get());
+                if (primary &&
+                    primary->token.type ==
+                        lexer::token_type::STRING_CONSTANT) {
+                    return string_initializer(type, primary->token.raw);
+                }
+            }
+
+            if (type->kind == semantic::Type::Kind::POINTER_TYPE) {
+                if (auto primary =
+                        dynamic_cast<const parser::Primary_expression *>(
+                            expression_initializer->expression.get())) {
+                    if (primary->token.type ==
+                            lexer::token_type::STRING_CONSTANT &&
+                        type->element->kind ==
+                            semantic::Type::Kind::CHAR_TYPE) {
+                        return string_pointer(primary->token.raw);
+                    }
+                    if (primary->token.type ==
+                        lexer::token_type::IDENTIFIER) {
+                        auto function = module->getFunction(
+                            llvm::StringRef(
+                                primary->token.raw.data(),
+                                primary->token.raw.size()));
+                        if (function) return function;
+                    }
+                }
+            }
+
+            auto value = semantic::Constant_evaluator::evaluate(
+                *expression_initializer->expression);
+            if (!value) {
+                unsupported("non-constant global initializer");
+            }
+            if (type->kind == semantic::Type::Kind::POINTER_TYPE) {
+                if (value->value != 0) {
+                    unsupported("non-null integer pointer initializer");
+                }
+                return llvm::ConstantPointerNull::get(
+                    llvm::cast<llvm::PointerType>(type_of(type)));
+            }
+            return llvm::ConstantInt::get(
+                type_of(type),
+                value->value,
+                true);
+        }
+
+        auto list = dynamic_cast<const parser::Initializer_list *>(
+            &initializer);
+        if (!list) {
+            unsupported("global initializer");
+        }
+        if (type->kind != semantic::Type::Kind::ARRAY_TYPE) {
+            if (list->elements.empty()) {
+                return llvm::Constant::getNullValue(type_of(type));
+            }
+            return constant_initializer(*list->elements[0], type);
+        }
+
+        std::vector<llvm::Constant *> elements;
+        for (auto &element : list->elements) {
+            elements.push_back(
+                constant_initializer(*element, type->element));
+        }
+        while (static_cast<int>(elements.size()) <
+               static_cast<int>(*type->array_size)) {
+            elements.push_back(
+                llvm::Constant::getNullValue(type_of(type->element)));
+        }
+        return llvm::ConstantArray::get(
+            llvm::cast<llvm::ArrayType>(type_of(type)),
+            elements);
+    }
+
     void global_declaration(const parser::Declvariable &node) {
         if (node.is_typedef) return;
 
         for (auto &init_declarator : node.declarators) {
             auto &declarator = *init_declarator->declarator;
-            if (declarator.is_function) {
+            auto symbol = semantic_result.symbol(declarator);
+            if (!symbol) unsupported("global declaration symbol");
+            if (symbol->kind == semantic::Symbol::Kind::FUNCTION) {
                 parser::Declaration_specifiers specifiers{
                     node.type,
                     node.is_const,
@@ -728,34 +1315,18 @@ class LLVM_codegen {
                 declare_function(specifiers, declarator);
                 continue;
             }
-            if (declarator.pointer_depth != 0 ||
-                !declarator.array_dimensions.empty()) {
-                unsupported("global pointer or array");
-            }
 
             llvm::Constant *initializer =
-                llvm::ConstantInt::get(type_of(node.type), 0);
+                llvm::Constant::getNullValue(type_of(symbol->type));
             if (init_declarator->initializer) {
-                auto expression_initializer =
-                    dynamic_cast<const parser::Expression_initializer *>(
-                        init_declarator->initializer.get());
-                if (!expression_initializer) {
-                    unsupported("global initializer list");
-                }
-                auto value = semantic::Constant_evaluator::evaluate(
-                    *expression_initializer->expression);
-                if (!value) {
-                    unsupported("non-constant global initializer");
-                }
-                initializer = llvm::ConstantInt::get(
-                    type_of(node.type),
-                    value->value,
-                    true);
+                initializer = constant_initializer(
+                    *init_declarator->initializer,
+                    symbol->type);
             }
 
             new llvm::GlobalVariable(
                 *module,
-                type_of(node.type),
+                type_of(symbol->type),
                 node.is_const,
                 node.is_static
                     ? llvm::GlobalValue::InternalLinkage
@@ -764,6 +1335,24 @@ class LLVM_codegen {
                 llvm::StringRef(
                     declarator.name.raw.data(),
                     declarator.name.raw.size()));
+        }
+    }
+
+    void predeclare_functions(const parser::Declvariable &node) {
+        if (node.is_typedef) return;
+
+        parser::Declaration_specifiers specifiers{
+            node.type,
+            node.is_const,
+            node.is_static,
+            node.is_typedef
+        };
+        for (auto &item : node.declarators) {
+            auto symbol = semantic_result.symbol(*item->declarator);
+            if (symbol &&
+                symbol->kind == semantic::Symbol::Kind::FUNCTION) {
+                declare_function(specifiers, *item->declarator);
+            }
         }
     }
 
@@ -778,6 +1367,8 @@ class LLVM_codegen {
         }
 
         current_function = function;
+        current_return_type = semantic_result.symbol(
+            *node.declarator)->type->return_type;
         auto entry = llvm::BasicBlock::Create(
             context,
             "entry",
@@ -811,7 +1402,8 @@ class LLVM_codegen {
                 builder.CreateRetVoid();
             }
             else {
-                builder.CreateRet(integer(0));
+                builder.CreateRet(
+                    convert(integer(0), current_return_type));
             }
         }
 
@@ -822,6 +1414,7 @@ class LLVM_codegen {
                 std::string(node.declarator->name.raw));
         }
         current_function = nullptr;
+        current_return_type.reset();
     }
 
 public:
@@ -833,13 +1426,13 @@ public:
 
     llvm::Module &generate(const parser::Program &program) {
         semantic::Semantic_analyzer analyzer;
-        analyzer.analyze(program);
+        semantic_result = analyzer.analyze(program);
 
         for (auto &external : program.external_declarations) {
             if (auto declaration =
                     dynamic_cast<const parser::Declvariable *>(
                         external.get())) {
-                global_declaration(*declaration);
+                predeclare_functions(*declaration);
             }
             else if (auto function =
                          dynamic_cast<const parser::Function_definition *>(
@@ -847,6 +1440,14 @@ public:
                 declare_function(
                     function->specifiers,
                     *function->declarator);
+            }
+        }
+
+        for (auto &external : program.external_declarations) {
+            if (auto declaration =
+                    dynamic_cast<const parser::Declvariable *>(
+                        external.get())) {
+                global_declaration(*declaration);
             }
         }
 
@@ -870,6 +1471,18 @@ public:
         module->print(stream, nullptr);
         stream.flush();
         return result;
+    }
+
+    void emit_object(const std::filesystem::path &path) {
+        LLVM_target::emit_object(*module, path);
+    }
+
+    void emit_executable(const std::filesystem::path &path) {
+        auto object = path;
+        object += ".o";
+        emit_object(object);
+        LLVM_target::link_executable(object, path);
+        std::filesystem::remove(object);
     }
 };
 

@@ -717,6 +717,25 @@ TEST_CASE("preprocessor handles undef and include guards") {
     CHECK(result.find("int value = 9;") != std::string::npos);
 }
 
+TEST_CASE("preprocessor supports stringify token paste and variadic macros") {
+    std::string source = R"(
+        #define STRINGIFY(value) #value
+        #define CONCAT(left, right) left ## right
+        #define CALL(function, ...) function(__VA_ARGS__)
+
+        char *name = STRINGIFY(hello world);
+        int CONCAT(my, Value) = 3;
+        int result = CALL(add, 1, 2);
+    )";
+
+    preprocessor::Preprocessor preprocessor;
+    std::string result = preprocessor.process(source, "macro-extra.c");
+
+    CHECK(result.find("\"hello world\"") != std::string::npos);
+    CHECK(result.find("int myValue = 3;") != std::string::npos);
+    CHECK(result.find("int result = add(1, 2);") != std::string::npos);
+}
+
 TEST_CASE("AST constant evaluator follows expression precedence") {
     std::string source = "1 + 2 * 3 == 7 ? 40 + 2 : unknown";
     Reader reader("constant.c", source);
@@ -858,4 +877,397 @@ TEST_CASE("semantic analysis recognizes typedef names") {
 
     semantic::Semantic_analyzer analyzer;
     CHECK_NOTHROW(analyzer.analyze(*program));
+}
+
+TEST_CASE("LLVM codegen supports pointers arrays and initializer lists") {
+    std::string source = R"(
+        int values[4] = {10, 20, 30, 40};
+
+        int main() {
+            int local[3] = {1, 2, 3};
+            int *pointer = &local[0];
+            pointer = pointer + 1;
+            *pointer += values[2];
+            return local[1];
+        }
+    )";
+
+    Reader reader("pointer-array.c", source);
+    lexer::LexerMgr mgr(reader);
+    auto lexer = mgr.get_lexer();
+    auto program = parser::Program::match(lexer);
+
+    REQUIRE(program != nullptr);
+    REQUIRE_FALSE(program->error_occur);
+
+    codegen::LLVM_codegen codegen("pointer_array");
+    CHECK_NOTHROW(codegen.generate(*program));
+    std::string ir = codegen.ir();
+
+    CHECK(ir.find("@values = global [4 x i32]") != std::string::npos);
+    CHECK(ir.find("getelementptr") != std::string::npos);
+    CHECK(ir.find("alloca [3 x i32]") != std::string::npos);
+}
+
+TEST_CASE("LLVM codegen supports switch fallthrough and break") {
+    std::string source = R"(
+        int classify(int value) {
+            int result = 0;
+            switch (value) {
+                case 1:
+                    result = 10;
+                    break;
+                case 2:
+                case 3:
+                    result = 20;
+                    break;
+                default:
+                    result = 30;
+            }
+            return result;
+        }
+    )";
+
+    Reader reader("switch-codegen.c", source);
+    lexer::LexerMgr mgr(reader);
+    auto lexer = mgr.get_lexer();
+    auto program = parser::Program::match(lexer);
+
+    REQUIRE(program != nullptr);
+    REQUIRE_FALSE(program->error_occur);
+
+    codegen::LLVM_codegen codegen("switch_codegen");
+    CHECK_NOTHROW(codegen.generate(*program));
+    std::string ir = codegen.ir();
+
+    CHECK(ir.find("switch i32") != std::string::npos);
+    CHECK(ir.find("i32 1") != std::string::npos);
+    CHECK(ir.find("i32 2") != std::string::npos);
+    CHECK(ir.find("i32 3") != std::string::npos);
+}
+
+TEST_CASE("semantic analysis rejects undeclared identifiers and invalid control flow") {
+    SUBCASE("undeclared identifier") {
+        std::string source = "int main() { return missing; }";
+        Reader reader("semantic.c", source);
+        lexer::LexerMgr mgr(reader);
+        auto lexer = mgr.get_lexer();
+        auto program = parser::Program::match(lexer);
+
+        semantic::Semantic_analyzer analyzer;
+        CHECK_THROWS_AS(
+            analyzer.analyze(*program),
+            semantic::Compile_error);
+    }
+
+    SUBCASE("break outside loop") {
+        std::string source = "int main() { break; return 0; }";
+        Reader reader("semantic.c", source);
+        lexer::LexerMgr mgr(reader);
+        auto lexer = mgr.get_lexer();
+        auto program = parser::Program::match(lexer);
+
+        semantic::Semantic_analyzer analyzer;
+        CHECK_THROWS_AS(
+            analyzer.analyze(*program),
+            semantic::Compile_error);
+    }
+}
+
+TEST_CASE("nested declarators distinguish arrays from pointers to arrays") {
+    std::string source = R"(
+        int *array_of_pointers[4];
+        int (*pointer_to_array)[4];
+        int (*function_pointer)(int value);
+    )";
+
+    Reader reader("nested-declarator.c", source);
+    lexer::LexerMgr mgr(reader);
+    auto lexer = mgr.get_lexer();
+    auto program = parser::Program::match(lexer);
+
+    REQUIRE(program != nullptr);
+    REQUIRE(program->external_declarations.size() == 3);
+
+    semantic::Semantic_analyzer analyzer;
+    auto result = analyzer.analyze(*program);
+
+    auto array_declaration =
+        dynamic_cast<parser::Declvariable *>(
+            program->external_declarations[0].get());
+    auto pointer_declaration =
+        dynamic_cast<parser::Declvariable *>(
+            program->external_declarations[1].get());
+    auto function_pointer_declaration =
+        dynamic_cast<parser::Declvariable *>(
+            program->external_declarations[2].get());
+
+    REQUIRE(array_declaration != nullptr);
+    REQUIRE(pointer_declaration != nullptr);
+    REQUIRE(function_pointer_declaration != nullptr);
+
+    auto array_type = result.symbol(
+        *array_declaration->declarators[0]->declarator)->type;
+    auto pointer_type = result.symbol(
+        *pointer_declaration->declarators[0]->declarator)->type;
+    auto function_pointer_type = result.symbol(
+        *function_pointer_declaration->declarators[0]->declarator)->type;
+
+    CHECK(array_type->kind == semantic::Type::Kind::ARRAY_TYPE);
+    CHECK(array_type->element->kind ==
+          semantic::Type::Kind::POINTER_TYPE);
+    CHECK(pointer_type->kind == semantic::Type::Kind::POINTER_TYPE);
+    CHECK(pointer_type->element->kind ==
+          semantic::Type::Kind::ARRAY_TYPE);
+    CHECK(function_pointer_type->kind ==
+          semantic::Type::Kind::POINTER_TYPE);
+    CHECK(function_pointer_type->element->kind ==
+          semantic::Type::Kind::FUNCTION_TYPE);
+}
+
+TEST_CASE("semantic array dimensions preserve C declarator order") {
+    std::string source = "int matrix[3][4];";
+    Reader reader("matrix.c", source);
+    lexer::LexerMgr mgr(reader);
+    auto lexer = mgr.get_lexer();
+    auto program = parser::Program::match(lexer);
+
+    semantic::Semantic_analyzer analyzer;
+    auto result = analyzer.analyze(*program);
+    auto declaration =
+        dynamic_cast<parser::Declvariable *>(
+            program->external_declarations[0].get());
+
+    REQUIRE(declaration != nullptr);
+    auto type = result.symbol(
+        *declaration->declarators[0]->declarator)->type;
+    REQUIRE(type->kind == semantic::Type::Kind::ARRAY_TYPE);
+    REQUIRE(type->array_size.has_value());
+    CHECK(*type->array_size == 3);
+    REQUIRE(type->element->kind ==
+            semantic::Type::Kind::ARRAY_TYPE);
+    REQUIRE(type->element->array_size.has_value());
+    CHECK(*type->element->array_size == 4);
+}
+
+TEST_CASE("function pointer declarator is not a function definition") {
+    std::string source = R"(
+        int (*function)(int value) {
+            return value;
+        }
+    )";
+
+    Reader reader("function-pointer-definition.c", source);
+    lexer::LexerMgr mgr(reader);
+    auto lexer = mgr.get_lexer();
+    auto program = parser::Program::match(lexer);
+
+    REQUIRE(program != nullptr);
+    CHECK(program->error_occur);
+    for (auto &external : program->external_declarations) {
+        CHECK(dynamic_cast<parser::Function_definition *>(
+                  external.get()) == nullptr);
+    }
+}
+
+TEST_CASE("LLVM codegen supports an indirect function pointer call") {
+    std::string source = R"(
+        int add_one(int value) {
+            return value + 1;
+        }
+
+        int main() {
+            int (*function)(int value) = add_one;
+            return function(41);
+        }
+    )";
+
+    Reader reader("function-pointer.c", source);
+    lexer::LexerMgr mgr(reader);
+    auto lexer = mgr.get_lexer();
+    auto program = parser::Program::match(lexer);
+
+    REQUIRE(program != nullptr);
+    REQUIRE_FALSE(program->error_occur);
+
+    codegen::LLVM_codegen codegen("function_pointer");
+    CHECK_NOTHROW(codegen.generate(*program));
+    CHECK(codegen.ir().find("call i32 %") != std::string::npos);
+}
+
+TEST_CASE("semantic analysis infers array size from initializer list") {
+    std::string source = R"(
+        int values[] = {1, 2, 3};
+    )";
+
+    Reader reader("inferred-array.c", source);
+    lexer::LexerMgr mgr(reader);
+    auto lexer = mgr.get_lexer();
+    auto program = parser::Program::match(lexer);
+
+    semantic::Semantic_analyzer analyzer;
+    auto result = analyzer.analyze(*program);
+    auto declaration =
+        dynamic_cast<parser::Declvariable *>(
+            program->external_declarations[0].get());
+
+    REQUIRE(declaration != nullptr);
+    auto type = result.symbol(
+        *declaration->declarators[0]->declarator)->type;
+    REQUIRE(type->array_size.has_value());
+    CHECK(*type->array_size == 3);
+}
+
+TEST_CASE("semantic analysis rejects duplicate switch labels") {
+    std::string source = R"(
+        int main() {
+            switch (1) {
+                case 2:
+                    break;
+                case 2:
+                    break;
+            }
+            return 0;
+        }
+    )";
+
+    Reader reader("duplicate-case.c", source);
+    lexer::LexerMgr mgr(reader);
+    auto lexer = mgr.get_lexer();
+    auto program = parser::Program::match(lexer);
+
+    semantic::Semantic_analyzer analyzer;
+    CHECK_THROWS_WITH_AS(
+        analyzer.analyze(*program),
+        "compile error: duplicate case value",
+        semantic::Compile_error);
+}
+
+TEST_CASE("semantic analysis requires a prototype for forward calls") {
+    SUBCASE("missing prototype") {
+        std::string source = R"(
+            int first() {
+                return second();
+            }
+
+            int second() {
+                return 42;
+            }
+        )";
+
+        Reader reader("forward-call.c", source);
+        lexer::LexerMgr mgr(reader);
+        auto lexer = mgr.get_lexer();
+        auto program = parser::Program::match(lexer);
+
+        semantic::Semantic_analyzer analyzer;
+        CHECK_THROWS_AS(
+            analyzer.analyze(*program),
+            semantic::Compile_error);
+    }
+
+    SUBCASE("prototype makes the call visible") {
+        std::string source = R"(
+            int second();
+
+            int first() {
+                return second();
+            }
+
+            int second() {
+                return 42;
+            }
+        )";
+
+        Reader reader("forward-call.c", source);
+        lexer::LexerMgr mgr(reader);
+        auto lexer = mgr.get_lexer();
+        auto program = parser::Program::match(lexer);
+
+        semantic::Semantic_analyzer analyzer;
+        CHECK_NOTHROW(analyzer.analyze(*program));
+    }
+}
+
+TEST_CASE("LLVM codegen converts chars pointers and global function pointers") {
+    std::string source = R"(
+        int add_one(int value) {
+            return value + 1;
+        }
+
+        int (*selected)(int value) = add_one;
+
+        int main() {
+            char value = 41;
+            int values[] = {10, 20};
+            int *pointer = 0;
+            pointer = &values[0];
+            pointer++;
+            return selected(value) + *pointer;
+        }
+    )";
+
+    Reader reader("codegen-conversion.c", source);
+    lexer::LexerMgr mgr(reader);
+    auto lexer = mgr.get_lexer();
+    auto program = parser::Program::match(lexer);
+
+    codegen::LLVM_codegen codegen("codegen_conversion");
+    CHECK_NOTHROW(codegen.generate(*program));
+    std::string ir = codegen.ir();
+
+    CHECK(ir.find("@selected = global ptr @add_one") != std::string::npos);
+    CHECK(ir.find("alloca i8") != std::string::npos);
+    CHECK(ir.find("alloca [2 x i32]") != std::string::npos);
+}
+
+TEST_CASE("string literals initialize character arrays and pointers") {
+    std::string source = R"(
+        char global_text[] = "A\n";
+        char *global_pointer = "hello";
+
+        int main() {
+            char local[3] = "xy";
+            return global_text[1] + local[0] + global_pointer[0];
+        }
+    )";
+
+    Reader reader("string-initializer.c", source);
+    lexer::LexerMgr mgr(reader);
+    auto lexer = mgr.get_lexer();
+    auto program = parser::Program::match(lexer);
+
+    codegen::LLVM_codegen codegen("string_initializer");
+    CHECK_NOTHROW(codegen.generate(*program));
+    std::string ir = codegen.ir();
+
+    CHECK(ir.find("@global_text = global [3 x i8]") !=
+          std::string::npos);
+    CHECK(ir.find("@global_pointer = global ptr") !=
+          std::string::npos);
+    CHECK(ir.find("alloca [3 x i8]") != std::string::npos);
+}
+
+TEST_CASE("preprocessor accepts an empty macro argument") {
+    preprocessor::Preprocessor preprocessor;
+    std::string result = preprocessor.process(
+        "#define STRINGIFY(value) #value\n"
+        "char *value = STRINGIFY();\n",
+        "empty-argument.c");
+
+    CHECK(result.find("char *value = \"\";") != std::string::npos);
+}
+
+TEST_CASE("preprocessor treats unknown condition identifiers as zero") {
+    preprocessor::Preprocessor preprocessor;
+    std::string result = preprocessor.process(
+        "#if UNKNOWN + 1\n"
+        "int selected;\n"
+        "#else\n"
+        "int wrong;\n"
+        "#endif\n",
+        "unknown-condition.c");
+
+    CHECK(result.find("int selected;") != std::string::npos);
+    CHECK(result.find("int wrong;") == std::string::npos);
 }

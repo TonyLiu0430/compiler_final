@@ -128,6 +128,7 @@ struct Parameter_declaration;
 struct Declarator : Node {
     lexer::Token name;
     int pointer_depth = 0;
+    std::unique_ptr<Declarator> nested;
     std::vector<std::unique_ptr<Expression>> array_dimensions;
     bool is_function = false;
     std::vector<std::unique_ptr<Parameter_declaration>> parameters;
@@ -291,7 +292,25 @@ inline bool can_start_declarator(lexer::Lexer lexer) {
         lexer.next_token();
     }
     return lexer.has_next() &&
-           lexer.peek_next().match<lexer::token_type::IDENTIFIER>();
+           (lexer.peek_next().match<lexer::token_type::IDENTIFIER>() ||
+            (lexer.peek_next().raw.size() == 1 &&
+             lexer.peek_next().match<lexer::token_type::OPERATOR>('(')));
+}
+
+inline bool is_function_definition_declarator(
+    const Declarator &declarator) {
+    if (!declarator.is_function) return false;
+
+    auto nested = declarator.nested.get();
+    while (nested) {
+        if (nested->pointer_depth != 0 ||
+            !nested->array_dimensions.empty() ||
+            nested->is_function) {
+            return false;
+        }
+        nested = nested->nested.get();
+    }
+    return true;
 }
 
 consteval bool has_ll1_start(std::meta::info type) {
@@ -608,14 +627,37 @@ inline std::unique_ptr<Declarator> Declarator::match(lexer::Lexer &lexer) {
         pointer_depth++;
     }
 
-    if (!lexer.has_next() ||
-        !lexer.peek_next().match<lexer::token_type::IDENTIFIER>()) {
+    if (!lexer.has_next()) {
         lexer.report_error("declarator expect a identifier");
         return nullptr;
     }
 
-    auto cur = std::make_unique<Declarator>(
-        lexer.next_token(), pointer_depth);
+    std::unique_ptr<Declarator> cur;
+    if (lexer.peek_next().match<lexer::token_type::IDENTIFIER>()) {
+        cur = std::make_unique<Declarator>(
+            lexer.next_token(), pointer_depth);
+    }
+    else if (lexer.peek_next().raw.size() == 1 &&
+             lexer.peek_next().match<lexer::token_type::OPERATOR>('(')) {
+        lexer.next_token();
+        auto nested = Declarator::match(lexer);
+        if (!nested) return nullptr;
+        if (!expect_operator(
+                lexer,
+                ')',
+                "expect ')' after nested declarator")) {
+            return nullptr;
+        }
+
+        cur = std::make_unique<Declarator>(
+            nested->name,
+            pointer_depth);
+        cur->nested = std::move(nested);
+    }
+    else {
+        lexer.report_error("declarator expect a identifier");
+        return nullptr;
+    }
 
     while (lexer.has_next()) {
         if (lexer.peek_next().raw.size() == 1 &&
@@ -829,7 +871,7 @@ inline std::unique_ptr<Function_definition> Function_definition::try_match(
 
     auto probe_declarator = Declarator::match(probe);
     if (!probe_declarator ||
-        !probe_declarator->is_function ||
+        !is_function_definition_declarator(*probe_declarator) ||
         !probe.has_next() ||
         !probe.peek_next().match<lexer::token_type::PUNCTUATOR>('{')) {
         return nullptr;
@@ -840,7 +882,8 @@ inline std::unique_ptr<Function_definition> Function_definition::try_match(
 
     auto cur = std::make_unique<Function_definition>(*specifiers);
     cur->declarator = Declarator::match(lexer);
-    if (!cur->declarator || !cur->declarator->is_function) {
+    if (!cur->declarator ||
+        !is_function_definition_declarator(*cur->declarator)) {
         return nullptr;
     }
 
