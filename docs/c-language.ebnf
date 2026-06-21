@@ -150,7 +150,17 @@ do-while-statement =
 type-name =
     { type-qualifier },
     type-specifier,
-    { "*" } ;
+    { type-qualifier },
+    [ abstract-declarator ] ;
+
+abstract-declarator =
+    { "*" },
+    { abstract-declarator-suffix } ;
+
+abstract-declarator-suffix =
+    "[",
+    [ assignment-expression ],
+    "]" ;
 
 expression-statement =
     [ expression ],

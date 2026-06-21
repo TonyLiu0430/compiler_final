@@ -5,6 +5,7 @@
 #include <fstream>
 
 #include "lexer/lexer.hpp"
+#include "preprocessor/preprocessor.hpp"
 
 using namespace std;
 using namespace c9ay;
@@ -24,7 +25,8 @@ std::string read_whole_file_text(const std::string& path) {
 int main() {
     try {
         std::string path = R"(E:\CODE_programming\compiler\test\2.c)";
-        std::string content = read_whole_file_text(path);
+        preprocessor::Preprocessor preprocessor;
+        std::string content = preprocessor.process_file(path);
         std::print("{}", content);
         Reader reader(path, content);
         while (1) {

@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "parser/parser.h"
+#include "preprocessor/preprocessor.hpp"
 
 using namespace c9ay;
 
@@ -616,4 +617,84 @@ TEST_CASE("program parses function definitions and global declarations") {
     CHECK(identity->declarator->pointer_depth == 1);
     REQUIRE(identity->body != nullptr);
     CHECK(identity->body->statements.size() == 2);
+}
+
+TEST_CASE("cast expression keeps its abstract declarator") {
+    std::string source = "(const int **)value";
+    Reader reader("cast.c", source);
+    lexer::LexerMgr mgr(reader);
+    auto lexer = mgr.get_lexer();
+
+    auto expression = parser::Expression::parse(lexer);
+    auto cast = dynamic_cast<parser::Cast_expression *>(expression.get());
+
+    REQUIRE(cast != nullptr);
+    REQUIRE(cast->type != nullptr);
+    CHECK(cast->type->type.raw == "int");
+    CHECK(cast->type->is_const);
+    REQUIRE(cast->type->declarator != nullptr);
+    CHECK(cast->type->declarator->pointer_depth == 2);
+}
+
+TEST_CASE("abstract declarator supports pointer and array suffixes") {
+    std::string source = "int *[3][]";
+    Reader reader("type-name.c", source);
+    lexer::LexerMgr mgr(reader);
+    auto lexer = mgr.get_lexer();
+
+    auto type = parser::Type_name::try_match(lexer);
+
+    REQUIRE(type != nullptr);
+    REQUIRE(type->declarator != nullptr);
+    CHECK(type->declarator->pointer_depth == 1);
+    REQUIRE(type->declarator->array_dimensions.size() == 2);
+    CHECK(type->declarator->array_dimensions[0] != nullptr);
+    CHECK(type->declarator->array_dimensions[1] == nullptr);
+}
+
+TEST_CASE("preprocessor expands macros and selects conditional branches") {
+    std::string source = R"(
+        #define VALUE 3
+        #define ADD(left, right) ((left) + (right))
+        #define REMOVED 1
+        #undef REMOVED
+        #if defined(VALUE) && VALUE == 3
+        int value = ADD(VALUE, 2);
+        #else
+        int wrong;
+        #endif
+        #ifdef REMOVED
+        int also_wrong;
+        #endif
+    )";
+
+    preprocessor::Preprocessor preprocessor;
+    std::string result = preprocessor.process(source, "macro.c");
+
+    CHECK(result.find("int value = ((3) + (2));") != std::string::npos);
+    CHECK(result.find("int wrong;") == std::string::npos);
+    CHECK(result.find("int also_wrong;") == std::string::npos);
+}
+
+TEST_CASE("preprocessor handles undef and include guards") {
+    preprocessor::Preprocessor preprocessor;
+    auto fixture =
+        std::filesystem::path(__FILE__).parent_path() / "fixtures";
+    preprocessor.add_include_path(fixture);
+
+    std::string source = R"(
+        #include "preprocessor_value.h"
+        #include "preprocessor_value.h"
+        int value = INCLUDED_VALUE;
+    )";
+    std::string result = preprocessor.process(
+        source,
+        fixture / "translation-unit.c");
+
+    CHECK(result.find("int included_declaration;") != std::string::npos);
+    CHECK(result.find(
+              "int included_declaration;",
+              result.find("int included_declaration;") + 1) ==
+          std::string::npos);
+    CHECK(result.find("int value = 9;") != std::string::npos);
 }
