@@ -4,7 +4,9 @@
 // #include "doctest.h"
 #include <fstream>
 
+#include "codegen/llvm_codegen.hpp"
 #include "lexer/lexer.hpp"
+#include "parser/parser.h"
 #include "preprocessor/preprocessor.hpp"
 
 using namespace std;
@@ -22,20 +24,24 @@ std::string read_whole_file_text(const std::string& path) {
     return content;
 }
 
-int main() {
+int main(int argc, char **argv) {
     try {
-        std::string path = R"(E:\CODE_programming\compiler\test\2.c)";
+        std::string path =
+            argc > 1
+                ? argv[1]
+                : R"(E:\CODE_programming\compiler\test\2.c)";
         preprocessor::Preprocessor preprocessor;
         std::string content = preprocessor.process_file(path);
-        std::print("{}", content);
         Reader reader(path, content);
-        while (1) {
-            lexer::Token t = lexer::impl::next_token(reader);
-            if (t.raw == "") break;
-            std::println("<{} : {}>", t.raw, int(t.type));
-        }
+        lexer::LexerMgr manager(reader);
+        auto lexer = manager.get_lexer();
+        auto program = parser::Program::match(lexer);
+        codegen::LLVM_codegen codegen(path);
+        codegen.generate(*program);
+        std::print("{}", codegen.ir());
     } catch (std::exception& e) {
-        std::cout << "error occur : " << e.what();
+        std::cerr << e.what() << '\n';
+        return 1;
     }
 }
 

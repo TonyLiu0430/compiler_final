@@ -5,9 +5,11 @@
 #include <string_view>
 #include <vector>
 
+#include "codegen/llvm_codegen.hpp"
 #include "parser/parser.h"
 #include "preprocessor/preprocessor.hpp"
 #include "semantic/constant_evaluator.hpp"
+#include "semantic/semantic_analyzer.hpp"
 
 using namespace c9ay;
 
@@ -766,4 +768,94 @@ TEST_CASE("preprocessor constant expression uses shared integer operations") {
         preprocessor::Constant_expression("1 / 0")
             .evaluate()
             .has_value());
+}
+
+TEST_CASE("LLVM codegen emits verified IR for basic C") {
+    std::string source = R"(
+        int global = 2;
+
+        int add(int left, int right) {
+            int result = left + right;
+            return result;
+        }
+
+        int main() {
+            int value = add(20, 22);
+            if (value == 42) {
+                global += value;
+            }
+
+            while (global > 40) {
+                global--;
+                if (global == 42)
+                    break;
+            }
+            return global;
+        }
+    )";
+
+    Reader reader("codegen.c", source);
+    lexer::LexerMgr mgr(reader);
+    auto lexer = mgr.get_lexer();
+    auto program = parser::Program::match(lexer);
+
+    REQUIRE(program != nullptr);
+    REQUIRE_FALSE(program->error_occur);
+
+    codegen::LLVM_codegen codegen("codegen_test");
+    codegen.generate(*program);
+    std::string ir = codegen.ir();
+
+    CHECK(ir.find("@global = global i32 2") != std::string::npos);
+    CHECK(ir.find("define i32 @add") != std::string::npos);
+    CHECK(ir.find("define i32 @main") != std::string::npos);
+    CHECK(ir.find("call i32 @add") != std::string::npos);
+    CHECK(ir.find("while.condition") != std::string::npos);
+    CHECK(ir.find("ret i32") != std::string::npos);
+}
+
+TEST_CASE("semantic analysis rejects unknown types before codegen") {
+    std::string source = R"(
+        Unknown global;
+
+        int main() {
+            return 0;
+        }
+    )";
+
+    Reader reader("unknown-type.c", source);
+    lexer::LexerMgr mgr(reader);
+    auto lexer = mgr.get_lexer();
+    auto program = parser::Program::match(lexer);
+
+    REQUIRE(program != nullptr);
+
+    semantic::Semantic_analyzer analyzer;
+    CHECK_THROWS_WITH_AS(
+        analyzer.analyze(*program),
+        "compile error: unknown type 'Unknown'",
+        semantic::Compile_error);
+}
+
+TEST_CASE("semantic analysis recognizes typedef names") {
+    std::string source = R"(
+        typedef int Integer;
+        Integer global;
+
+        int main() {
+            typedef Integer LocalInteger;
+            LocalInteger value = 42;
+            return value;
+        }
+    )";
+
+    Reader reader("typedef-semantic.c", source);
+    lexer::LexerMgr mgr(reader);
+    auto lexer = mgr.get_lexer();
+    auto program = parser::Program::match(lexer);
+
+    REQUIRE(program != nullptr);
+
+    semantic::Semantic_analyzer analyzer;
+    CHECK_NOTHROW(analyzer.analyze(*program));
 }
