@@ -64,5 +64,14 @@ public:
     int get_cnt() {
         return cnt;
     }
+    std::string_view get_raw() {
+        return raw;
+    }
+    void set_cnt(int _cnt) {
+        assert_c9ay(
+            0 <= _cnt &&
+            _cnt <= static_cast<int>(raw.size()));
+        cnt = _cnt;
+    }
 };
 }  // namespace c9ay

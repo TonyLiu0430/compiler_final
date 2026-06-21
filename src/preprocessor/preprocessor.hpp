@@ -11,6 +11,8 @@
 #include <utility>
 #include <vector>
 
+#include "lexer/scanner.hpp"
+
 namespace c9ay::preprocessor {
 
 struct Macro {
@@ -30,11 +32,23 @@ class Preprocessor {
     std::vector<std::filesystem::path> include_paths;
 
     static bool is_identifier_start(char ch) {
-        return std::isalpha(static_cast<unsigned char>(ch)) || ch == '_';
+        return scanner::is_identifier_start(ch);
     }
 
     static bool is_identifier_char(char ch) {
-        return std::isalnum(static_cast<unsigned char>(ch)) || ch == '_';
+        return scanner::is_identifier_char(ch);
+    }
+
+    static scanner::Token next_non_trivia(
+        std::string_view text,
+        int &cnt) {
+        while (1) {
+            auto token = scanner::next_token(text, cnt);
+            if (token.type != scanner::token_type::WHITESPACE &&
+                token.type != scanner::token_type::COMMENT) {
+                return token;
+            }
+        }
     }
 
     static std::string_view trim_left(std::string_view text) {
@@ -92,47 +106,38 @@ class Preprocessor {
         std::vector<std::string> arguments;
         int depth = 1;
         int begin = open_parenthesis + 1;
-        char quote = 0;
-        bool escape = false;
+        int cnt = begin;
 
-        for (int i = begin; i < static_cast<int>(text.size()); i++) {
-            char ch = text[i];
-            if (quote != 0) {
-                if (escape) {
-                    escape = false;
-                }
-                else if (ch == '\\') {
-                    escape = true;
-                }
-                else if (ch == quote) {
-                    quote = 0;
-                }
+        while (1) {
+            auto token = scanner::next_token(text, cnt);
+            if (token.type == scanner::token_type::END ||
+                token.type == scanner::token_type::INVALID) {
+                return {{}, -1};
+            }
+            if (token.type != scanner::token_type::PUNCTUATOR) {
                 continue;
             }
 
-            if (ch == '"' || ch == '\'') {
-                quote = ch;
-            }
-            else if (ch == '(') {
+            if (token.raw == "(") {
                 depth++;
             }
-            else if (ch == ')') {
+            else if (token.raw == ")") {
                 depth--;
                 if (depth == 0) {
-                    auto argument = trim(text.substr(begin, i - begin));
+                    auto argument =
+                        trim(text.substr(begin, token.left - begin));
                     if (!argument.empty() || !arguments.empty()) {
                         arguments.emplace_back(argument);
                     }
-                    return {std::move(arguments), i + 1};
+                    return {std::move(arguments), token.right};
                 }
             }
-            else if (ch == ',' && depth == 1) {
-                arguments.emplace_back(trim(text.substr(begin, i - begin)));
-                begin = i + 1;
+            else if (token.raw == "," && depth == 1) {
+                arguments.emplace_back(
+                    trim(text.substr(begin, token.left - begin)));
+                begin = token.right;
             }
         }
-
-        return {{}, -1};
     }
 
     static std::string substitute_parameters(
@@ -145,21 +150,20 @@ class Preprocessor {
 
         std::string result;
         std::string_view text = macro.replacement;
-        for (int i = 0; i < static_cast<int>(text.size());) {
-            if (!is_identifier_start(text[i])) {
-                result.push_back(text[i++]);
+        int cnt = 0;
+        while (1) {
+            auto token = scanner::next_token(text, cnt);
+            if (token.type == scanner::token_type::END) {
+                break;
+            }
+            if (token.type != scanner::token_type::IDENTIFIER) {
+                result.append(token.raw);
                 continue;
             }
 
-            int begin = i++;
-            while (i < static_cast<int>(text.size()) &&
-                   is_identifier_char(text[i])) {
-                i++;
-            }
-            std::string_view name = text.substr(begin, i - begin);
-            auto found = values.find(name);
+            auto found = values.find(token.raw);
             if (found == values.end()) {
-                result.append(name);
+                result.append(token.raw);
             }
             else {
                 result.append(found->second);
@@ -172,40 +176,23 @@ class Preprocessor {
         std::string_view text,
         std::unordered_set<std::string> disabled = {}) {
         std::string result;
+        int cnt = 0;
 
-        for (int i = 0; i < static_cast<int>(text.size());) {
-            if (text[i] == '"' || text[i] == '\'') {
-                char quote = text[i++];
-                bool escape = false;
-                result.push_back(quote);
-                while (i < static_cast<int>(text.size())) {
-                    char ch = text[i++];
-                    result.push_back(ch);
-                    if (escape) {
-                        escape = false;
-                    }
-                    else if (ch == '\\') {
-                        escape = true;
-                    }
-                    else if (ch == quote) {
-                        break;
-                    }
-                }
+        while (1) {
+            auto token = scanner::next_token(text, cnt);
+            if (token.type == scanner::token_type::END) {
+                break;
+            }
+            if (token.type == scanner::token_type::COMMENT) {
+                result.push_back(' ');
+                continue;
+            }
+            if (token.type != scanner::token_type::IDENTIFIER) {
+                result.append(token.raw);
                 continue;
             }
 
-            if (!is_identifier_start(text[i])) {
-                result.push_back(text[i++]);
-                continue;
-            }
-
-            int begin = i++;
-            while (i < static_cast<int>(text.size()) &&
-                   is_identifier_char(text[i])) {
-                i++;
-            }
-
-            std::string name(text.substr(begin, i - begin));
+            std::string name(token.raw);
             auto found = macros.find(name);
             if (found == macros.end() || disabled.contains(name)) {
                 result.append(name);
@@ -221,23 +208,19 @@ class Preprocessor {
                 continue;
             }
 
-            int open_parenthesis = i;
-            while (open_parenthesis < static_cast<int>(text.size()) &&
-                   std::isspace(static_cast<unsigned char>(
-                       text[open_parenthesis]))) {
-                open_parenthesis++;
-            }
-            if (open_parenthesis >= static_cast<int>(text.size()) ||
-                text[open_parenthesis] != '(') {
+            int probe = cnt;
+            auto open = next_non_trivia(text, probe);
+            if (open.type != scanner::token_type::PUNCTUATOR ||
+                open.raw != "(") {
                 result.append(name);
                 continue;
             }
 
             auto [arguments, end] =
-                parse_arguments(text, open_parenthesis);
+                parse_arguments(text, open.left);
             if (end == -1 ||
                 arguments.size() != macro.parameters.size()) {
-                result.append(text.substr(begin, i - begin));
+                result.append(name);
                 continue;
             }
 
@@ -247,7 +230,7 @@ class Preprocessor {
             std::string replacement =
                 substitute_parameters(macro, arguments);
             result += expand_text(replacement, std::move(next_disabled));
-            i = end;
+            cnt = end;
         }
 
         return result;
@@ -255,54 +238,45 @@ class Preprocessor {
 
     std::string replace_defined(std::string_view expression) {
         std::string result;
-        for (int i = 0; i < static_cast<int>(expression.size());) {
-            if (!is_identifier_start(expression[i])) {
-                result.push_back(expression[i++]);
+        int cnt = 0;
+
+        while (1) {
+            auto token = scanner::next_token(expression, cnt);
+            if (token.type == scanner::token_type::END) {
+                break;
+            }
+            if (token.type != scanner::token_type::IDENTIFIER ||
+                token.raw != "defined") {
+                result.append(token.raw);
                 continue;
             }
 
-            int begin = i++;
-            while (i < static_cast<int>(expression.size()) &&
-                   is_identifier_char(expression[i])) {
-                i++;
-            }
-            std::string_view name = expression.substr(begin, i - begin);
-            if (name != "defined") {
-                result.append(name);
-                continue;
-            }
-
-            while (i < static_cast<int>(expression.size()) &&
-                   std::isspace(static_cast<unsigned char>(expression[i]))) {
-                i++;
-            }
-
+            int probe = cnt;
+            auto next = next_non_trivia(expression, probe);
             bool parenthesized =
-                i < static_cast<int>(expression.size()) &&
-                expression[i] == '(';
-            if (parenthesized) i++;
-            while (i < static_cast<int>(expression.size()) &&
-                   std::isspace(static_cast<unsigned char>(expression[i]))) {
-                i++;
+                next.type == scanner::token_type::PUNCTUATOR &&
+                next.raw == "(";
+            if (parenthesized) {
+                next = next_non_trivia(expression, probe);
             }
 
-            int identifier_begin = i;
-            while (i < static_cast<int>(expression.size()) &&
-                   is_identifier_char(expression[i])) {
-                i++;
+            if (next.type != scanner::token_type::IDENTIFIER) {
+                result.append(token.raw);
+                continue;
             }
-            std::string identifier(
-                expression.substr(identifier_begin, i - identifier_begin));
-            while (i < static_cast<int>(expression.size()) &&
-                   std::isspace(static_cast<unsigned char>(expression[i]))) {
-                i++;
+
+            std::string identifier(next.raw);
+            if (parenthesized) {
+                auto close = next_non_trivia(expression, probe);
+                if (close.type != scanner::token_type::PUNCTUATOR ||
+                    close.raw != ")") {
+                    result.append(token.raw);
+                    continue;
+                }
             }
-            if (parenthesized &&
-                i < static_cast<int>(expression.size()) &&
-                expression[i] == ')') {
-                i++;
-            }
+
             result += macros.contains(identifier) ? "1" : "0";
+            cnt = probe;
         }
         return result;
     }
@@ -478,36 +452,50 @@ class Preprocessor {
 
     void define_macro(std::string_view body) {
         body = trim_left(body);
-        if (body.empty() || !is_identifier_start(body.front())) return;
+        int cnt = 0;
+        auto name_token = scanner::next_token(body, cnt);
+        if (name_token.type != scanner::token_type::IDENTIFIER) return;
 
-        int cnt = 1;
-        while (cnt < static_cast<int>(body.size()) &&
-               is_identifier_char(body[cnt])) {
-            cnt++;
-        }
-
-        std::string name(body.substr(0, cnt));
+        std::string name(name_token.raw);
         Macro macro;
 
-        if (cnt < static_cast<int>(body.size()) && body[cnt] == '(') {
+        int after_name = cnt;
+        auto open = scanner::next_token(body, cnt);
+        if (open.type == scanner::token_type::PUNCTUATOR &&
+            open.raw == "(") {
             macro.function_like = true;
-            int end = static_cast<int>(body.find(')', cnt + 1));
-            if (end == -1) return;
 
-            std::string_view parameters =
-                body.substr(cnt + 1, end - cnt - 1);
-            while (!trim(parameters).empty()) {
-                int comma = static_cast<int>(parameters.find(','));
-                std::string_view parameter =
-                    comma == -1 ? parameters : parameters.substr(0, comma);
-                macro.parameters.emplace_back(trim(parameter));
-                if (comma == -1) break;
-                parameters.remove_prefix(comma + 1);
+            auto parameter = next_non_trivia(body, cnt);
+            if (parameter.type == scanner::token_type::PUNCTUATOR &&
+                parameter.raw == ")") {
+                macro.replacement =
+                    std::string(trim_left(body.substr(parameter.right)));
+                macros[name] = std::move(macro);
+                return;
             }
-            macro.replacement = std::string(trim_left(body.substr(end + 1)));
+
+            while (1) {
+                if (parameter.type != scanner::token_type::IDENTIFIER) {
+                    return;
+                }
+                macro.parameters.emplace_back(parameter.raw);
+
+                auto separator = next_non_trivia(body, cnt);
+                if (separator.type != scanner::token_type::PUNCTUATOR) {
+                    return;
+                }
+                if (separator.raw == ")") {
+                    macro.replacement =
+                        std::string(trim_left(body.substr(separator.right)));
+                    break;
+                }
+                if (separator.raw != ",") return;
+                parameter = next_non_trivia(body, cnt);
+            }
         }
         else {
-            macro.replacement = std::string(trim_left(body.substr(cnt)));
+            macro.replacement =
+                std::string(trim_left(body.substr(after_name)));
         }
 
         macros[name] = std::move(macro);
@@ -546,15 +534,18 @@ class Preprocessor {
             std::string_view content = trim_left(line);
             bool active = conditions.empty() || conditions.back().active;
 
-            if (!content.empty() && content.front() == '#') {
-                content = trim_left(content.substr(1));
-                int name_end = 0;
-                while (name_end < static_cast<int>(content.size()) &&
-                       is_identifier_char(content[name_end])) {
-                    name_end++;
-                }
-                std::string_view directive = content.substr(0, name_end);
-                std::string_view body = trim_left(content.substr(name_end));
+            int directive_cnt = 0;
+            auto hash = scanner::next_token(content, directive_cnt);
+            if (hash.type == scanner::token_type::PUNCTUATOR &&
+                hash.raw == "#") {
+                auto directive_token =
+                    next_non_trivia(content, directive_cnt);
+                std::string_view directive =
+                    directive_token.type == scanner::token_type::IDENTIFIER
+                        ? directive_token.raw
+                        : std::string_view();
+                std::string_view body =
+                    trim_left(content.substr(directive_token.right));
 
                 if (directive == "if" ||
                     directive == "ifdef" ||

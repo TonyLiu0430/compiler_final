@@ -1,16 +1,13 @@
 #pragma once
 
-#include <ext/pb_ds/assoc_container.hpp>
-#include <ext/pb_ds/trie_policy.hpp>
-#include <array>
 #include <meta>
-#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
 
 #include "base/error.hpp"
 #include "base/util.hpp"
+#include "lexer/scanner.hpp"
 #include "reader/reader.hpp"
 #include "utility"
 
@@ -104,261 +101,86 @@ token_type keyword_mapping(std::string_view key) {
     return token_type::IDENTIFIER;
 }
 
-std::optional<Token> match_char_str(Reader &reader) {
-    Reader begin = reader;
-    auto start = reader.next_char();
-    token_type type;
-    if (start == '\'') {
-        type = token_type::CHAR_CONSTANT;
-    }
-    else if (start == '\"') {
-        type = token_type::STRING_CONSTANT;
-    }
-    else {
-        assert_c9ay(false);
-    }
-
-    bool escape = false;
-    while (reader.has_next()) {
-        auto c = reader.next_char();
-        if (escape) {
-            escape = false;
-            if (!is_one_of<"ntf\'\"\\">(c)) {
-                reader.report_error("not illegal escape char");
-            }
-        }
-        else if (c == '\\') {
-            escape = true;
-        }
-        else if (c == start) {
-            return Token(reader.diff(begin), type, reader.get_cnt());
-        }
-    }
-
-    if (type == token_type::CHAR_CONSTANT) {
-        reader.report_error("未閉合 char constant");
-    }
-    else {
-        reader.report_error("未閉合 string constant");
-    }
-    return std::nullopt;
-}
-
-Token match_identifier_keyword(Reader &reader) {
-    Reader begin = reader;
-    while (reader.has_next()) {
-        auto c = reader.peek_next();
-        if (is_alphabet(c) || is_digit(c) || c == '_') {
-            reader.next_char();
-        }
-        else {
-            break;
-        }
-    }
-    auto raw = reader.diff(begin);
-    return Token(raw, keyword_mapping(raw), reader.get_cnt());
-}
-
-Token match_numbers(Reader &reader) {
-    Reader begin = reader;
-    while (reader.has_next()) {
-        auto c = reader.peek_next();
-        if (is_digit(c) || c == '.') {
-            reader.next_char();
-        }
-        else {
-            return Token(reader.diff(begin), token_type::NUMBER, reader.get_cnt());
-        }
-    }
-    return Token(reader.diff(begin), token_type::NUMBER, reader.get_cnt());
-}
-
 bool is_punctuarter(char ch) {
     return is_one_of<"{}#;">(ch);
 }
 
-bool is_operator(char ch) {
-    return is_one_of<"+-*/%<>=!&|^~.[]()?:,">(ch);
-}
-
-struct Operator_trie {
-    struct Node {
-        std::array<int, 128> next;
-        bool terminal = false;
-
-        Node() {
-            next.fill(-1);
-        }
-    };
-
-    std::vector<Node> nodes;
-
-    Operator_trie() {
-        nodes.emplace_back();
-
-        constexpr std::string_view operators[] = {
-            // postfix / member
-            "[",   "]",   "(",   ")",   "++",  "--",  ".",   "->",
-
-            // unary / arithmetic
-            "+",   "-",   "*",   "/",   "%",   "!",   "~",
-
-            // shift / comparison
-            "<<",  ">>",  "<",   ">",   "<=",  ">=",  "==",  "!=",
-
-            // bitwise / logical
-            "&",   "^",   "|",   "&&",  "||",
-
-            // assignment
-            "=",   "*=",  "/=",  "%=",  "+=",  "-=",
-            "<<=", ">>=", "&=",  "^=",  "|=",
-
-            // conditional / comma
-            "?",   ":",   ","
-        };
-
-        for (auto op : operators) {
-            int node = 0;
-            for (char ch : op) {
-                int idx = static_cast<unsigned char>(ch);
-                if (nodes[node].next[idx] == -1) {
-                    nodes[node].next[idx] = static_cast<int>(nodes.size());
-                    nodes.emplace_back();
-                }
-                node = nodes[node].next[idx];
-            }
-            nodes[node].terminal = true;
+void validate_escape_sequence(
+    Reader &reader,
+    scanner::Token token) {
+    for (int i = 1; i + 1 < static_cast<int>(token.raw.size()); i++) {
+        if (token.raw[i] != '\\') continue;
+        i++;
+        if (!is_one_of<"ntf\'\"\\">(token.raw[i])) {
+            reader.report_error(
+                "not illegal escape char",
+                token.left + i);
         }
     }
-};
-
-const Operator_trie &get_operator_trie() {
-    static const Operator_trie trie;
-    return trie;
-}
-
-std::optional<Token> match_punctuarter(Reader &reader) {
-    Reader begin = reader;
-    if (is_punctuarter(reader.next_char())) {
-        return Token(reader.diff(begin), token_type::PUNCTUATOR, reader.get_cnt());
-    }
-    return std::nullopt;
-}
-
-std::optional<Token> match_operator(Reader &reader) {
-    Reader begin = reader;
-    const auto &trie = get_operator_trie();
-    int node = 0;
-    int consumed = 0;
-    int matched = -1;
-
-    while (reader.has_next()) {
-        auto ch = reader.peek_next();
-        if (ch < 0 || ch >= 128) break;
-
-        int next = trie.nodes[node].next[static_cast<int>(ch)];
-        if (next == -1) break;
-
-        reader.next_char();
-        consumed++;
-        node = next;
-        if (trie.nodes[node].terminal) {
-            matched = consumed;
-        }
-    }
-
-    if (matched == -1) {
-        while (consumed-- > 0) reader.prev_char();
-        return std::nullopt;
-    }
-    while (consumed > matched) {
-        reader.prev_char();
-        consumed--;
-    }
-
-    return Token(reader.diff(begin), token_type::OPERATOR, reader.get_cnt());
-}
-
-bool match_comment(Reader &reader) {
-    Reader begin = reader;
-    if (reader.next_char() != '/') {
-        reader.prev_char();
-        return false;
-    }
-    if (!reader.has_next()) {
-        reader.prev_char();
-        return false;
-    }
-
-    auto second = reader.next_char();
-    if (second == '/') {
-        while (reader.has_next() && reader.peek_next() != '\n') {
-            reader.next_char();
-        }
-        return true;
-    }
-    if (second == '*') {
-        while (reader.has_next()) {
-            auto ch = reader.next_char();
-            if (ch == '*' && reader.has_next() && reader.peek_next() == '/') {
-                reader.next_char();
-                return true;
-            }
-        }
-        reader.report_error("unterminated block comment", begin.get_cnt());
-        return true;
-    }
-
-    reader.prev_char();
-    reader.prev_char();
-    return false;
 }
 
 Token next_token(Reader &reader) {
-    while (reader.has_next()) {
-        auto c = reader.peek_next();
-        while (reader.has_next() && is_ws_endl(c)) {
-            reader.next_char();
-            if (!reader.has_next()) {
-                return Token("", token_type::END, reader.get_cnt());
-            }
-            c = reader.peek_next();
-        }
+    while (1) {
+        int cnt = reader.get_cnt();
+        scanner::Token token =
+            scanner::next_token(reader.get_raw(), cnt);
+        reader.set_cnt(cnt);
 
-        if (c == '/' && match_comment(reader)) {
+        if (token.type == scanner::token_type::WHITESPACE ||
+            token.type == scanner::token_type::NEWLINE ||
+            token.type == scanner::token_type::COMMENT) {
             continue;
         }
 
-        std::optional<Token> tok;
-        if (c == '\'' || c == '\"') {
-            // char constant or string constant
-            tok = match_char_str(reader);
+        if (token.type == scanner::token_type::END) {
+            return Token("", token_type::END, token.right);
         }
-        else if (is_alphabet(c) || c == '_') {
-            // identifier or keyword
-            tok = match_identifier_keyword(reader);
+        if (token.type == scanner::token_type::IDENTIFIER) {
+            return Token(
+                token.raw,
+                keyword_mapping(token.raw),
+                token.right);
         }
-        else if (is_digit(c)) {
-            // number
-            tok = match_numbers(reader);
+        if (token.type == scanner::token_type::NUMBER) {
+            return Token(token.raw, token_type::NUMBER, token.right);
         }
-        else if (is_punctuarter(c)) {
-            tok = match_punctuarter(reader);
+        if (token.type == scanner::token_type::STRING_CONSTANT) {
+            validate_escape_sequence(reader, token);
+            return Token(
+                token.raw,
+                token_type::STRING_CONSTANT,
+                token.right);
         }
-        else if (is_operator(c)) {
-            tok = match_operator(reader);
+        if (token.type == scanner::token_type::CHAR_CONSTANT) {
+            validate_escape_sequence(reader, token);
+            return Token(
+                token.raw,
+                token_type::CHAR_CONSTANT,
+                token.right);
+        }
+        if (token.type == scanner::token_type::PUNCTUATOR) {
+            token_type type =
+                token.raw.size() == 1 &&
+                is_punctuarter(token.raw.front())
+                    ? token_type::PUNCTUATOR
+                    : token_type::OPERATOR;
+            return Token(token.raw, type, token.right);
         }
 
-        if (tok.has_value()) {
-            return tok.value();
+        if (!token.raw.empty() && token.raw.front() == '\'') {
+            reader.report_error("未閉合 char constant", token.left);
         }
-
-        Reader begin = reader;
-        reader.report_error("unknown character");
-        reader.next_char();
-        return Token(reader.diff(begin), token_type::ERROR, reader.get_cnt());
+        else if (!token.raw.empty() && token.raw.front() == '"') {
+            reader.report_error("未閉合 string constant", token.left);
+        }
+        else if (token.raw.starts_with("/*")) {
+            reader.report_error("unterminated block comment", token.left);
+        }
+        else {
+            reader.report_error("unknown character", token.left);
+        }
+        return Token(token.raw, token_type::ERROR, token.right);
     }
-    return Token("", token_type::END, reader.get_cnt());
 }
 }  // namespace impl
 

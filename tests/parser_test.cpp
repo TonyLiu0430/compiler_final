@@ -676,6 +676,21 @@ TEST_CASE("preprocessor expands macros and selects conditional branches") {
     CHECK(result.find("int also_wrong;") == std::string::npos);
 }
 
+TEST_CASE("preprocessor expansion follows scanner token boundaries") {
+    std::string source = R"(
+        #define NAME value
+        char *text = "NAME";
+        int NAME = 1; // NAME
+    )";
+
+    preprocessor::Preprocessor preprocessor;
+    std::string result = preprocessor.process(source, "scanner.c");
+
+    CHECK(result.find("\"NAME\"") != std::string::npos);
+    CHECK(result.find("int value = 1;") != std::string::npos);
+    CHECK(result.find("// NAME") == std::string::npos);
+}
+
 TEST_CASE("preprocessor handles undef and include guards") {
     preprocessor::Preprocessor preprocessor;
     auto fixture =
