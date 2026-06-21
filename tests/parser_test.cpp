@@ -192,7 +192,8 @@ TEST_CASE("block parses declaration if while and do while") {
     REQUIRE(while_statement != nullptr);
     REQUIRE(do_while_statement != nullptr);
 
-    CHECK(declaration->initializer != nullptr);
+    REQUIRE(declaration->declarators.size() == 1);
+    CHECK(declaration->declarators[0]->initializer != nullptr);
     CHECK(if_statement->condition != nullptr);
     CHECK(if_statement->then_statement != nullptr);
     CHECK(if_statement->else_statement != nullptr);
@@ -279,4 +280,340 @@ TEST_CASE("return break and continue parse as jump statements") {
     CHECK(return_void->expression == nullptr);
     CHECK(dynamic_cast<parser::Break_statement *>(block->statements[2].get()) != nullptr);
     CHECK(dynamic_cast<parser::Continue_statement *>(block->statements[3].get()) != nullptr);
+}
+
+TEST_CASE("switch parses case default and fallthrough statements") {
+    std::string source = R"(
+        {
+            switch (value) {
+                case 0:
+                    value = 1;
+                    break;
+                case 1:
+                case 2:
+                    return value;
+                default:
+                    value = 0;
+            }
+        }
+    )";
+
+    Reader reader("switch.c", source);
+    lexer::LexerMgr mgr(reader);
+    auto lexer = mgr.get_lexer();
+    auto block = parser::Block::match(lexer);
+
+    REQUIRE(block != nullptr);
+    REQUIRE(block->statements.size() == 1);
+
+    auto switch_statement =
+        dynamic_cast<parser::Switch_statement *>(block->statements[0].get());
+    REQUIRE(switch_statement != nullptr);
+    REQUIRE(switch_statement->condition != nullptr);
+
+    auto switch_body =
+        dynamic_cast<parser::Block *>(switch_statement->body.get());
+    REQUIRE(switch_body != nullptr);
+    REQUIRE(switch_body->statements.size() == 4);
+
+    auto case_zero =
+        dynamic_cast<parser::Case_statement *>(switch_body->statements[0].get());
+    auto case_one =
+        dynamic_cast<parser::Case_statement *>(switch_body->statements[2].get());
+    auto default_statement =
+        dynamic_cast<parser::Default_statement *>(switch_body->statements[3].get());
+
+    REQUIRE(case_zero != nullptr);
+    REQUIRE(case_one != nullptr);
+    REQUIRE(default_statement != nullptr);
+    CHECK(dynamic_cast<parser::Expression_statement *>(case_zero->statement.get()) != nullptr);
+    CHECK(dynamic_cast<parser::Case_statement *>(case_one->statement.get()) != nullptr);
+    CHECK(dynamic_cast<parser::Expression_statement *>(default_statement->statement.get()) != nullptr);
+    CHECK(dynamic_cast<parser::Break_statement *>(switch_body->statements[1].get()) != nullptr);
+}
+
+TEST_CASE("typedef is parsed as a simplified declaration specifier") {
+    std::string source = R"(
+        {
+            typedef int Integer;
+            Integer value = 3;
+        }
+    )";
+
+    Reader reader("typedef.c", source);
+    lexer::LexerMgr mgr(reader);
+    auto lexer = mgr.get_lexer();
+    auto block = parser::Block::match(lexer);
+
+    REQUIRE(block != nullptr);
+    REQUIRE(block->statements.size() == 2);
+
+    auto typedef_declaration =
+        dynamic_cast<parser::Declvariable *>(block->statements[0].get());
+    auto variable_declaration =
+        dynamic_cast<parser::Declvariable *>(block->statements[1].get());
+
+    REQUIRE(typedef_declaration != nullptr);
+    REQUIRE(variable_declaration != nullptr);
+    CHECK(typedef_declaration->is_typedef);
+    CHECK(typedef_declaration->type.raw == "int");
+    REQUIRE(typedef_declaration->declarators.size() == 1);
+    CHECK(typedef_declaration->declarators[0]->declarator->name.raw == "Integer");
+    CHECK_FALSE(variable_declaration->is_typedef);
+    CHECK(variable_declaration->type.raw == "Integer");
+}
+
+TEST_CASE("pointer and array declarators preserve their structure") {
+    std::string source = R"(
+        {
+            int *pointer;
+            int **double_pointer;
+            int values[10];
+            int matrix[3][4];
+            int *pointer_table[8];
+            int incomplete[];
+        }
+    )";
+
+    Reader reader("declarator.c", source);
+    lexer::LexerMgr mgr(reader);
+    auto lexer = mgr.get_lexer();
+    auto block = parser::Block::match(lexer);
+
+    REQUIRE(block != nullptr);
+    REQUIRE(block->statements.size() == 6);
+
+    auto pointer =
+        dynamic_cast<parser::Declvariable *>(block->statements[0].get());
+    auto double_pointer =
+        dynamic_cast<parser::Declvariable *>(block->statements[1].get());
+    auto values =
+        dynamic_cast<parser::Declvariable *>(block->statements[2].get());
+    auto matrix =
+        dynamic_cast<parser::Declvariable *>(block->statements[3].get());
+    auto pointer_table =
+        dynamic_cast<parser::Declvariable *>(block->statements[4].get());
+    auto incomplete =
+        dynamic_cast<parser::Declvariable *>(block->statements[5].get());
+
+    REQUIRE(pointer != nullptr);
+    REQUIRE(double_pointer != nullptr);
+    REQUIRE(values != nullptr);
+    REQUIRE(matrix != nullptr);
+    REQUIRE(pointer_table != nullptr);
+    REQUIRE(incomplete != nullptr);
+
+    auto &pointer_declarator = pointer->declarators[0]->declarator;
+    auto &double_pointer_declarator = double_pointer->declarators[0]->declarator;
+    auto &values_declarator = values->declarators[0]->declarator;
+    auto &matrix_declarator = matrix->declarators[0]->declarator;
+    auto &pointer_table_declarator = pointer_table->declarators[0]->declarator;
+    auto &incomplete_declarator = incomplete->declarators[0]->declarator;
+
+    CHECK(pointer_declarator->pointer_depth == 1);
+    CHECK(pointer_declarator->array_dimensions.empty());
+    CHECK(double_pointer_declarator->pointer_depth == 2);
+
+    CHECK(values_declarator->pointer_depth == 0);
+    REQUIRE(values_declarator->array_dimensions.size() == 1);
+    CHECK(values_declarator->array_dimensions[0] != nullptr);
+
+    REQUIRE(matrix_declarator->array_dimensions.size() == 2);
+    CHECK(matrix_declarator->array_dimensions[0] != nullptr);
+    CHECK(matrix_declarator->array_dimensions[1] != nullptr);
+
+    CHECK(pointer_table_declarator->pointer_depth == 1);
+    REQUIRE(pointer_table_declarator->array_dimensions.size() == 1);
+
+    REQUIRE(incomplete_declarator->array_dimensions.size() == 1);
+    CHECK(incomplete_declarator->array_dimensions[0] == nullptr);
+}
+
+TEST_CASE("initializer lists support nesting and trailing commas") {
+    std::string source = R"(
+        {
+            int values[3] = {1, 2, 3};
+            int matrix[2][2] = {{1, 2}, {3, 4},};
+            int scalar = 7;
+        }
+    )";
+
+    Reader reader("initializer.c", source);
+    lexer::LexerMgr mgr(reader);
+    auto lexer = mgr.get_lexer();
+    auto block = parser::Block::match(lexer);
+
+    REQUIRE(block != nullptr);
+    REQUIRE(block->statements.size() == 3);
+
+    auto values =
+        dynamic_cast<parser::Declvariable *>(block->statements[0].get());
+    auto matrix =
+        dynamic_cast<parser::Declvariable *>(block->statements[1].get());
+    auto scalar =
+        dynamic_cast<parser::Declvariable *>(block->statements[2].get());
+
+    REQUIRE(values != nullptr);
+    REQUIRE(matrix != nullptr);
+    REQUIRE(scalar != nullptr);
+
+    auto values_list =
+        dynamic_cast<parser::Initializer_list *>(
+            values->declarators[0]->initializer.get());
+    auto matrix_list =
+        dynamic_cast<parser::Initializer_list *>(
+            matrix->declarators[0]->initializer.get());
+    auto scalar_expression =
+        dynamic_cast<parser::Expression_initializer *>(
+            scalar->declarators[0]->initializer.get());
+
+    REQUIRE(values_list != nullptr);
+    REQUIRE(matrix_list != nullptr);
+    REQUIRE(scalar_expression != nullptr);
+    CHECK(values_list->elements.size() == 3);
+    REQUIRE(matrix_list->elements.size() == 2);
+    CHECK(dynamic_cast<parser::Initializer_list *>(
+              matrix_list->elements[0].get()) != nullptr);
+    CHECK(dynamic_cast<parser::Initializer_list *>(
+              matrix_list->elements[1].get()) != nullptr);
+    CHECK(scalar_expression->expression != nullptr);
+}
+
+TEST_CASE("one declaration contains independent C declarators") {
+    std::string source = R"(
+        {
+            int *p, a, b;
+            int *left = 1, values[3] = {1, 2, 3}, **right;
+        }
+    )";
+
+    Reader reader("multi-declarator.c", source);
+    lexer::LexerMgr mgr(reader);
+    auto lexer = mgr.get_lexer();
+    auto block = parser::Block::match(lexer);
+
+    REQUIRE(block != nullptr);
+    REQUIRE(block->statements.size() == 2);
+
+    auto first =
+        dynamic_cast<parser::Declvariable *>(block->statements[0].get());
+    auto second =
+        dynamic_cast<parser::Declvariable *>(block->statements[1].get());
+
+    REQUIRE(first != nullptr);
+    REQUIRE(second != nullptr);
+    REQUIRE(first->declarators.size() == 3);
+    REQUIRE(second->declarators.size() == 3);
+
+    CHECK(first->declarators[0]->declarator->name.raw == "p");
+    CHECK(first->declarators[0]->declarator->pointer_depth == 1);
+    CHECK(first->declarators[1]->declarator->name.raw == "a");
+    CHECK(first->declarators[1]->declarator->pointer_depth == 0);
+    CHECK(first->declarators[2]->declarator->name.raw == "b");
+    CHECK(first->declarators[2]->declarator->pointer_depth == 0);
+
+    CHECK(second->declarators[0]->declarator->name.raw == "left");
+    CHECK(second->declarators[0]->declarator->pointer_depth == 1);
+    CHECK(second->declarators[0]->initializer != nullptr);
+
+    CHECK(second->declarators[1]->declarator->name.raw == "values");
+    CHECK(second->declarators[1]->declarator->pointer_depth == 0);
+    REQUIRE(second->declarators[1]->declarator->array_dimensions.size() == 1);
+    CHECK(dynamic_cast<parser::Initializer_list *>(
+              second->declarators[1]->initializer.get()) != nullptr);
+
+    CHECK(second->declarators[2]->declarator->name.raw == "right");
+    CHECK(second->declarators[2]->declarator->pointer_depth == 2);
+    CHECK(second->declarators[2]->initializer == nullptr);
+}
+
+TEST_CASE("function declarations reuse the declarator parser") {
+    std::string source = R"(
+        {
+            int declared(int value, int *buffer);
+        }
+    )";
+
+    Reader reader("function-declaration.c", source);
+    lexer::LexerMgr mgr(reader);
+    auto lexer = mgr.get_lexer();
+    auto block = parser::Block::match(lexer);
+
+    REQUIRE(block != nullptr);
+    REQUIRE(block->statements.size() == 1);
+
+    auto declaration =
+        dynamic_cast<parser::Declvariable *>(block->statements[0].get());
+    REQUIRE(declaration != nullptr);
+    REQUIRE(declaration->declarators.size() == 1);
+
+    auto &function = declaration->declarators[0]->declarator;
+    CHECK(function->name.raw == "declared");
+    CHECK(function->is_function);
+    REQUIRE(function->parameters.size() == 2);
+    REQUIRE(function->parameters[0]->declarator != nullptr);
+    REQUIRE(function->parameters[1]->declarator != nullptr);
+    CHECK(function->parameters[0]->declarator->name.raw == "value");
+    CHECK(function->parameters[0]->declarator->pointer_depth == 0);
+    CHECK(function->parameters[1]->declarator->name.raw == "buffer");
+    CHECK(function->parameters[1]->declarator->pointer_depth == 1);
+}
+
+TEST_CASE("program parses function definitions and global declarations") {
+    std::string source = R"(
+        int global_value;
+        int declared(int value);
+
+        int add(int left, int right) {
+            return left + right;
+        }
+
+        static int *identity(int *value) {
+            int *local = value;
+            return local;
+        }
+    )";
+
+    Reader reader("program.c", source);
+    lexer::LexerMgr mgr(reader);
+    auto lexer = mgr.get_lexer();
+    auto program = parser::Program::match(lexer);
+
+    REQUIRE(program != nullptr);
+    REQUIRE(program->external_declarations.size() == 4);
+
+    auto global =
+        dynamic_cast<parser::Declvariable *>(
+            program->external_declarations[0].get());
+    auto prototype =
+        dynamic_cast<parser::Declvariable *>(
+            program->external_declarations[1].get());
+    auto add =
+        dynamic_cast<parser::Function_definition *>(
+            program->external_declarations[2].get());
+    auto identity =
+        dynamic_cast<parser::Function_definition *>(
+            program->external_declarations[3].get());
+
+    REQUIRE(global != nullptr);
+    REQUIRE(prototype != nullptr);
+    REQUIRE(add != nullptr);
+    REQUIRE(identity != nullptr);
+
+    CHECK(prototype->declarators[0]->declarator->is_function);
+
+    CHECK(add->specifiers.type.raw == "int");
+    CHECK(add->declarator->name.raw == "add");
+    CHECK(add->declarator->is_function);
+    CHECK(add->declarator->parameters.size() == 2);
+    REQUIRE(add->body != nullptr);
+    CHECK(add->body->statements.size() == 1);
+    CHECK(dynamic_cast<parser::Return_statement *>(
+              add->body->statements[0].get()) != nullptr);
+
+    CHECK(identity->specifiers.is_static);
+    CHECK(identity->declarator->name.raw == "identity");
+    CHECK(identity->declarator->pointer_depth == 1);
+    REQUIRE(identity->body != nullptr);
+    CHECK(identity->body->statements.size() == 2);
 }

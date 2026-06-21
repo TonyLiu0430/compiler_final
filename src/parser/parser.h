@@ -2,6 +2,7 @@
 
 #include <meta>
 #include <memory>
+#include <optional>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -181,6 +182,32 @@ struct If_statement : Statement {
     static std::unique_ptr<If_statement> match(lexer::Lexer &lexer);
 };
 
+struct Switch_statement : Statement {
+    static constexpr lexer::token_type start = lexer::token_type::K_SWITCH;
+
+    std::unique_ptr<Expression> condition;
+    std::unique_ptr<Statement> body;
+
+    static std::unique_ptr<Switch_statement> match(lexer::Lexer &lexer);
+};
+
+struct Case_statement : Statement {
+    static constexpr lexer::token_type start = lexer::token_type::K_CASE;
+
+    std::unique_ptr<Expression> value;
+    std::unique_ptr<Statement> statement;
+
+    static std::unique_ptr<Case_statement> match(lexer::Lexer &lexer);
+};
+
+struct Default_statement : Statement {
+    static constexpr lexer::token_type start = lexer::token_type::K_DEFAULT;
+
+    std::unique_ptr<Statement> statement;
+
+    static std::unique_ptr<Default_statement> match(lexer::Lexer &lexer);
+};
+
 struct While_statement : Statement {
     static constexpr lexer::token_type start = lexer::token_type::K_WHILE;
 
@@ -236,22 +263,96 @@ struct Expression_statement : Statement {
     static std::unique_ptr<Expression_statement> match(lexer::Lexer &lexer);
 };
 
-struct Declvariable : Statement {
+struct Declaration_specifiers {
     lexer::Token type;
-    lexer::Token varible_name;
     bool is_const;
     bool is_static;
-    std::unique_ptr<Expression> initializer;
+    bool is_typedef;
+};
+
+struct Parameter_declaration;
+
+struct Declarator : Node {
+    lexer::Token name;
+    int pointer_depth = 0;
+    std::vector<std::unique_ptr<Expression>> array_dimensions;
+    bool is_function = false;
+    std::vector<std::unique_ptr<Parameter_declaration>> parameters;
+
+    Declarator(lexer::Token _name, int _pointer_depth)
+        : name(_name), pointer_depth(_pointer_depth) {}
+
+    static std::unique_ptr<Declarator> match(lexer::Lexer &lexer);
+};
+
+struct Parameter_declaration : Node {
+    Declaration_specifiers specifiers;
+    std::unique_ptr<Declarator> declarator;
+
+    Parameter_declaration(Declaration_specifiers _specifiers)
+        : specifiers(_specifiers) {}
+
+    static std::unique_ptr<Parameter_declaration> match(lexer::Lexer &lexer);
+};
+
+struct Initializer : Node {
+    static std::unique_ptr<Initializer> match(lexer::Lexer &lexer);
+};
+
+struct Expression_initializer : Initializer {
+    std::unique_ptr<Expression> expression;
+
+    Expression_initializer(std::unique_ptr<Expression> _expression)
+        : expression(std::move(_expression)) {
+        error_occur = expression->error_occur;
+    }
+};
+
+struct Initializer_list : Initializer {
+    std::vector<std::unique_ptr<Initializer>> elements;
+
+    void add_element(std::unique_ptr<Initializer> element) {
+        error_occur |= element->error_occur;
+        elements.push_back(std::move(element));
+    }
+};
+
+struct Init_declarator : Node {
+    std::unique_ptr<Declarator> declarator;
+    std::unique_ptr<Initializer> initializer;
+
+    Init_declarator(std::unique_ptr<Declarator> _declarator)
+        : declarator(std::move(_declarator)) {
+        error_occur = declarator->error_occur;
+    }
+
+    void set_initializer(std::unique_ptr<Initializer> _initializer) {
+        initializer = std::move(_initializer);
+        error_occur |= initializer->error_occur;
+    }
+};
+
+struct Declvariable : Statement {
+    lexer::Token type;
+    bool is_const;
+    bool is_static;
+    bool is_typedef;
+    std::vector<std::unique_ptr<Init_declarator>> declarators;
 
     Declvariable(
         lexer::Token _type,
-        lexer::Token _varible_name,
         bool _is_const,
-        bool _is_static)
+        bool _is_static,
+        bool _is_typedef)
         : type(_type),
-          varible_name(_varible_name),
           is_const(_is_const),
-          is_static(_is_static) {}
+          is_static(_is_static),
+          is_typedef(_is_typedef) {}
+
+    void add_declarator(std::unique_ptr<Init_declarator> declarator) {
+        error_occur |= declarator->error_occur;
+        declarators.push_back(std::move(declarator));
+    }
 
     static std::unique_ptr<Declvariable> match(lexer::Lexer &lexer);
     static std::unique_ptr<Declvariable> try_match(lexer::Lexer &lexer);
@@ -263,8 +364,19 @@ struct Block : Statement {
     static std::unique_ptr<Block> match(lexer::Lexer &lexer);
 };
 
+struct Function_definition : Node {
+    Declaration_specifiers specifiers;
+    std::unique_ptr<Declarator> declarator;
+    std::unique_ptr<Block> body;
+
+    Function_definition(Declaration_specifiers _specifiers)
+        : specifiers(_specifiers) {}
+
+    static std::unique_ptr<Function_definition> try_match(lexer::Lexer &lexer);
+};
+
 struct Program : Node {
-    std::vector<std::unique_ptr<Statement>> statements;
+    std::vector<std::unique_ptr<Node>> external_declarations;
 
     static std::unique_ptr<Program> match(lexer::Lexer &lexer);
 };
@@ -288,6 +400,56 @@ inline bool expect_punctuarter(lexer::Lexer &lexer, char ch, std::string_view me
     }
     lexer.next_token();
     return true;
+}
+
+inline std::optional<Declaration_specifiers> match_declaration_specifiers(
+    lexer::Lexer &lexer) {
+    bool is_const = false;
+    bool is_static = false;
+    bool is_typedef = false;
+
+    while (lexer.has_next()) {
+        lexer::Token token = lexer.peek_next();
+        if (token.match<lexer::token_type::K_TYPEDEF>()) {
+            is_typedef = true;
+        }
+        else if (token.match<lexer::token_type::K_CONST>()) {
+            is_const = true;
+        }
+        else if (token.match<lexer::token_type::K_STATIC>()) {
+            is_static = true;
+        }
+        else {
+            break;
+        }
+        lexer.next_token();
+    }
+
+    if (!lexer.has_next() ||
+        !lexer.peek_next().match<lexer::token_type::IDENTIFIER>()) {
+        return std::nullopt;
+    }
+
+    return Declaration_specifiers{
+        lexer.next_token(),
+        is_const,
+        is_static,
+        is_typedef
+    };
+}
+
+inline bool can_start_declaration(lexer::Lexer lexer) {
+    return match_declaration_specifiers(lexer).has_value();
+}
+
+inline bool can_start_declarator(lexer::Lexer lexer) {
+    while (lexer.has_next() &&
+           lexer.peek_next().raw.size() == 1 &&
+           lexer.peek_next().match<lexer::token_type::OPERATOR>('*')) {
+        lexer.next_token();
+    }
+    return lexer.has_next() &&
+           lexer.peek_next().match<lexer::token_type::IDENTIFIER>();
 }
 
 inline std::pair<int, int> infix_binding_power(std::string_view op) {
@@ -652,6 +814,51 @@ inline std::unique_ptr<If_statement> If_statement::match(lexer::Lexer &lexer) {
     return cur;
 }
 
+inline std::unique_ptr<Switch_statement> Switch_statement::match(lexer::Lexer &lexer) {
+    auto cur = std::make_unique<Switch_statement>();
+    assert_c9ay(lexer.next_token().match<lexer::token_type::K_SWITCH>());
+
+    if (!expect_operator(lexer, '(', "expect '(' after switch")) return nullptr;
+    cur->condition = Expression::match(lexer);
+    cur->error_occur |= cur->condition->error_occur;
+    if (!expect_operator(lexer, ')', "expect ')' after switch condition")) return nullptr;
+
+    cur->body = Statement::match(lexer);
+    if (!cur->body) return nullptr;
+    cur->error_occur |= cur->body->error_occur;
+    return cur;
+}
+
+inline std::unique_ptr<Case_statement> Case_statement::match(lexer::Lexer &lexer) {
+    auto cur = std::make_unique<Case_statement>();
+    assert_c9ay(lexer.next_token().match<lexer::token_type::K_CASE>());
+
+    cur->value = Expression::match(lexer);
+    cur->error_occur |= cur->value->error_occur;
+    if (!expect_operator(lexer, ':', "expect ':' after case expression")) {
+        return nullptr;
+    }
+
+    cur->statement = Statement::match(lexer);
+    if (!cur->statement) return nullptr;
+    cur->error_occur |= cur->statement->error_occur;
+    return cur;
+}
+
+inline std::unique_ptr<Default_statement> Default_statement::match(lexer::Lexer &lexer) {
+    auto cur = std::make_unique<Default_statement>();
+    assert_c9ay(lexer.next_token().match<lexer::token_type::K_DEFAULT>());
+
+    if (!expect_operator(lexer, ':', "expect ':' after default")) {
+        return nullptr;
+    }
+
+    cur->statement = Statement::match(lexer);
+    if (!cur->statement) return nullptr;
+    cur->error_occur |= cur->statement->error_occur;
+    return cur;
+}
+
 inline std::unique_ptr<While_statement> While_statement::match(lexer::Lexer &lexer) {
     auto cur = std::make_unique<While_statement>();
     assert_c9ay(lexer.next_token().match<lexer::token_type::K_WHILE>());
@@ -795,23 +1002,152 @@ inline std::unique_ptr<Expression_statement> Expression_statement::match(lexer::
     return cur;
 }
 
+inline std::unique_ptr<Declarator> Declarator::match(lexer::Lexer &lexer) {
+    int pointer_depth = 0;
+    while (lexer.has_next() &&
+           lexer.peek_next().raw.size() == 1 &&
+           lexer.peek_next().match<lexer::token_type::OPERATOR>('*')) {
+        lexer.next_token();
+        pointer_depth++;
+    }
+
+    if (!lexer.has_next() ||
+        !lexer.peek_next().match<lexer::token_type::IDENTIFIER>()) {
+        lexer.report_error("declarator expect a identifier");
+        return nullptr;
+    }
+
+    auto cur = std::make_unique<Declarator>(
+        lexer.next_token(), pointer_depth);
+
+    while (lexer.has_next()) {
+        if (lexer.peek_next().raw.size() == 1 &&
+            lexer.peek_next().match<lexer::token_type::OPERATOR>('[')) {
+            lexer.next_token();
+
+            if (lexer.peek_next().raw.size() == 1 &&
+                lexer.peek_next().match<lexer::token_type::OPERATOR>(']')) {
+                lexer.next_token();
+                cur->array_dimensions.push_back(nullptr);
+                continue;
+            }
+
+            auto dimension = Expression::parse(lexer, 2);
+            if (!dimension) {
+                dimension = Expression::recover(lexer);
+            }
+            cur->error_occur |= dimension->error_occur;
+            cur->array_dimensions.push_back(std::move(dimension));
+
+            if (!expect_operator(lexer, ']', "expect ']' after array dimension")) {
+                return nullptr;
+            }
+            continue;
+        }
+
+        if (lexer.peek_next().raw.size() == 1 &&
+            lexer.peek_next().match<lexer::token_type::OPERATOR>('(')) {
+            lexer.next_token();
+            cur->is_function = true;
+
+            if (lexer.peek_next().raw.size() == 1 &&
+                lexer.peek_next().match<lexer::token_type::OPERATOR>(')')) {
+                lexer.next_token();
+                continue;
+            }
+
+            while (1) {
+                auto parameter = Parameter_declaration::match(lexer);
+                if (!parameter) return nullptr;
+                cur->error_occur |= parameter->error_occur;
+                cur->parameters.push_back(std::move(parameter));
+
+                if (lexer.peek_next().raw.size() == 1 &&
+                    lexer.peek_next().match<lexer::token_type::OPERATOR>(')')) {
+                    lexer.next_token();
+                    break;
+                }
+                if (!expect_operator(lexer, ',', "expect ',' between parameters")) {
+                    return nullptr;
+                }
+            }
+            continue;
+        }
+
+        break;
+    }
+
+    return cur;
+}
+
+inline std::unique_ptr<Parameter_declaration> Parameter_declaration::match(
+    lexer::Lexer &lexer) {
+    auto specifiers = match_declaration_specifiers(lexer);
+    if (!specifiers) {
+        lexer.report_error("parameter expect declaration specifiers");
+        return nullptr;
+    }
+
+    auto cur = std::make_unique<Parameter_declaration>(*specifiers);
+
+    if (lexer.peek_next().raw.size() == 1 &&
+        (lexer.peek_next().match<lexer::token_type::OPERATOR>(')') ||
+         lexer.peek_next().match<lexer::token_type::OPERATOR>(','))) {
+        return cur;
+    }
+
+    cur->declarator = Declarator::match(lexer);
+    if (!cur->declarator) return nullptr;
+    cur->error_occur |= cur->declarator->error_occur;
+    return cur;
+}
+
+inline std::unique_ptr<Initializer> Initializer::match(lexer::Lexer &lexer) {
+    if (lexer.has_next() &&
+        lexer.peek_next().match<lexer::token_type::PUNCTUATOR>('{')) {
+        lexer.next_token();
+        auto list = std::make_unique<Initializer_list>();
+
+        if (lexer.peek_next().match<lexer::token_type::PUNCTUATOR>('}')) {
+            lexer.next_token();
+            return list;
+        }
+
+        while (1) {
+            auto element = Initializer::match(lexer);
+            if (!element) return nullptr;
+            list->add_element(std::move(element));
+
+            if (lexer.peek_next().match<lexer::token_type::PUNCTUATOR>('}')) {
+                lexer.next_token();
+                break;
+            }
+
+            if (!expect_operator(lexer, ',', "expect ',' between initializer elements")) {
+                return nullptr;
+            }
+
+            if (lexer.peek_next().match<lexer::token_type::PUNCTUATOR>('}')) {
+                lexer.next_token();
+                break;
+            }
+        }
+
+        return list;
+    }
+
+    auto expression = Expression::parse(lexer, 2);
+    if (!expression) {
+        expression = Expression::recover(lexer);
+    }
+    return std::make_unique<Expression_initializer>(
+        std::move(expression));
+}
+
 inline std::unique_ptr<Declvariable> Declvariable::try_match(lexer::Lexer &lexer) {
     lexer::Lexer probe = lexer;
-
-    while (probe.has_next() &&
-           (probe.peek_next().match<lexer::token_type::K_CONST>() ||
-            probe.peek_next().match<lexer::token_type::K_STATIC>())) {
-        probe.next_token();
-    }
-
-    if (!probe.has_next() ||
-        !probe.next_token().match<lexer::token_type::IDENTIFIER>()) {
-        return nullptr;
-    }
-    if (!probe.has_next() ||
-        !probe.peek_next().match<lexer::token_type::IDENTIFIER>()) {
-        return nullptr;
-    }
+    if (!match_declaration_specifiers(probe)) return nullptr;
+    if (!can_start_declarator(probe)) return nullptr;
 
     lexer::Lexer cur_state = lexer;
     auto result = match(cur_state);
@@ -822,46 +1158,39 @@ inline std::unique_ptr<Declvariable> Declvariable::try_match(lexer::Lexer &lexer
 }
 
 inline std::unique_ptr<Declvariable> Declvariable::match(lexer::Lexer &lexer) {
-    bool is_const = false;
-    bool is_static = false;
-    lexer::Token token = lexer.next_token();
-
-    while (!token.match<lexer::token_type::IDENTIFIER>()) {
-        if (token.match<lexer::token_type::K_CONST>()) {
-            if (is_const) {
-                lexer.report_error("duplicate 'const' declaration specifier");
-            }
-            is_const = true;
-        }
-        else if (token.match<lexer::token_type::K_STATIC>()) {
-            if (is_static) {
-                lexer.report_error("duplicate 'static' declaration specifier");
-            }
-            is_static = true;
-        }
-        else {
-            return nullptr;
-        }
-        token = lexer.next_token();
-    }
-
-    lexer::Token type = token;
-    lexer::Token varible_name = lexer.next_token();
-    if (!varible_name.match<lexer::token_type::IDENTIFIER>()) {
-        lexer.report_error("varible declaration expect a identifier");
-        return nullptr;
-    }
+    auto specifiers = match_declaration_specifiers(lexer);
+    if (!specifiers) return nullptr;
 
     auto cur = std::make_unique<Declvariable>(
-        type, varible_name, is_const, is_static);
+        specifiers->type,
+        specifiers->is_const,
+        specifiers->is_static,
+        specifiers->is_typedef);
 
-    if (lexer.has_next() &&
-        lexer.peek_next().raw.size() == 1 &&
-        lexer.peek_next().match<lexer::token_type::OPERATOR>('=')) {
+    while (1) {
+        auto declarator = Declarator::match(lexer);
+        if (!declarator) return nullptr;
+
+        auto init_declarator = std::make_unique<Init_declarator>(
+            std::move(declarator));
+
+        if (lexer.has_next() &&
+            lexer.peek_next().raw.size() == 1 &&
+            lexer.peek_next().match<lexer::token_type::OPERATOR>('=')) {
+            lexer.next_token();
+            auto initializer = Initializer::match(lexer);
+            if (!initializer) return nullptr;
+            init_declarator->set_initializer(std::move(initializer));
+        }
+
+        cur->add_declarator(std::move(init_declarator));
+
+        if (!lexer.has_next() ||
+            lexer.peek_next().raw.size() != 1 ||
+            !lexer.peek_next().match<lexer::token_type::OPERATOR>(',')) {
+            break;
+        }
         lexer.next_token();
-        cur->initializer = Expression::match(lexer);
-        if (!cur->initializer) return nullptr;
-        cur->error_occur |= cur->initializer->error_occur;
     }
 
     if (!expect_punctuarter(lexer, ';', "expect ';' after varible declaration")) {
@@ -893,16 +1222,58 @@ inline std::unique_ptr<Block> Block::match(lexer::Lexer &lexer) {
     return nullptr;
 }
 
+inline std::unique_ptr<Function_definition> Function_definition::try_match(
+    lexer::Lexer &lexer) {
+    lexer::Lexer probe = lexer;
+    auto probe_specifiers = match_declaration_specifiers(probe);
+    if (!probe_specifiers || !can_start_declarator(probe)) {
+        return nullptr;
+    }
+
+    auto probe_declarator = Declarator::match(probe);
+    if (!probe_declarator ||
+        !probe_declarator->is_function ||
+        !probe.has_next() ||
+        !probe.peek_next().match<lexer::token_type::PUNCTUATOR>('{')) {
+        return nullptr;
+    }
+
+    auto specifiers = match_declaration_specifiers(lexer);
+    if (!specifiers) return nullptr;
+
+    auto cur = std::make_unique<Function_definition>(*specifiers);
+    cur->declarator = Declarator::match(lexer);
+    if (!cur->declarator || !cur->declarator->is_function) {
+        return nullptr;
+    }
+
+    cur->body = Block::match(lexer);
+    if (!cur->body) return nullptr;
+    cur->error_occur =
+        cur->declarator->error_occur || cur->body->error_occur;
+    return cur;
+}
+
 inline std::unique_ptr<Program> Program::match(lexer::Lexer &lexer) {
     auto cur = std::make_unique<Program>();
     while (lexer.has_next()) {
-        auto statement = Statement::match(lexer);
-        if (!statement) {
-            lexer.panic_recovery<Statement>();
+        if (auto function = Function_definition::try_match(lexer)) {
+            cur->error_occur |= function->error_occur;
+            cur->external_declarations.push_back(std::move(function));
             continue;
         }
-        cur->error_occur |= statement->error_occur;
-        cur->statements.push_back(std::move(statement));
+
+        if (auto declaration = Declvariable::try_match(lexer)) {
+            cur->error_occur |= declaration->error_occur;
+            cur->external_declarations.push_back(std::move(declaration));
+            continue;
+        }
+
+        lexer.report_error("expect external declaration");
+        if (lexer.has_next()) {
+            lexer.panic_recovery<Statement>();
+        }
+        cur->error_occur = true;
     }
     return cur;
 }

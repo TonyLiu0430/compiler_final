@@ -30,12 +30,16 @@ enum class token_type {
     OPERATOR,
     K_IF,
     K_FOR,
+    K_SWITCH,
+    K_CASE,
+    K_DEFAULT,
     K_WHILE,
     K_DO,
     K_ELSE,
     K_RETURN,
     K_BREAK,
     K_CONTINUE,
+    K_TYPEDEF,
     K_CONST,
     K_STATIC
 };

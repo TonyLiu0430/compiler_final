@@ -29,7 +29,8 @@ declaration-specifiers =
     { type-qualifier } ;
 
 storage-class-specifier =
-    "static" ;
+    "static"
+  | "typedef" ;
 
 type-qualifier =
     "const" ;
@@ -43,7 +44,7 @@ init-declarator-list =
 
 init-declarator =
     declarator,
-    [ "=", expression ] ;
+    [ "=", initializer ] ;
 
 declarator =
     { "*" },
@@ -61,9 +62,20 @@ declarator-suffix =
     [ parameter-list ],
     ")" ;
 
+initializer =
+    assignment-expression
+  | initializer-list ;
+
+initializer-list =
+    "{",
+    [ initializer, { ",", initializer }, [ "," ] ],
+    "}" ;
+
 statement =
     block
   | if-statement
+  | switch-statement
+  | labeled-statement
   | for-statement
   | while-statement
   | do-while-statement
@@ -86,6 +98,22 @@ if-statement =
     ")",
     statement,
     [ "else", statement ] ;
+
+switch-statement =
+    "switch",
+    "(",
+    expression,
+    ")",
+    statement ;
+
+labeled-statement =
+    "case",
+    expression,
+    ":",
+    statement
+  | "default",
+    ":",
+    statement ;
 
 while-statement =
     "while",
