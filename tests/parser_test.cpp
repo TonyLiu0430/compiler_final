@@ -7,6 +7,7 @@
 
 #include "parser/parser.h"
 #include "preprocessor/preprocessor.hpp"
+#include "semantic/constant_evaluator.hpp"
 
 using namespace c9ay;
 
@@ -712,4 +713,57 @@ TEST_CASE("preprocessor handles undef and include guards") {
               result.find("int included_declaration;") + 1) ==
           std::string::npos);
     CHECK(result.find("int value = 9;") != std::string::npos);
+}
+
+TEST_CASE("AST constant evaluator follows expression precedence") {
+    std::string source = "1 + 2 * 3 == 7 ? 40 + 2 : unknown";
+    Reader reader("constant.c", source);
+    lexer::LexerMgr mgr(reader);
+    auto lexer = mgr.get_lexer();
+
+    auto expression = parser::Expression::parse(lexer);
+    REQUIRE(expression != nullptr);
+
+    auto value = semantic::Constant_evaluator::evaluate(*expression);
+    REQUIRE(value.has_value());
+    CHECK(value->value == 42);
+}
+
+TEST_CASE("AST constant evaluator rejects runtime expressions") {
+    std::string source = "value + 1";
+    Reader reader("constant.c", source);
+    lexer::LexerMgr mgr(reader);
+    auto lexer = mgr.get_lexer();
+
+    auto expression = parser::Expression::parse(lexer);
+    REQUIRE(expression != nullptr);
+    CHECK_FALSE(
+        semantic::Constant_evaluator::evaluate(*expression).has_value());
+}
+
+TEST_CASE("AST constant evaluator short circuits and handles characters") {
+    std::string source = "0 && unknown || '\\n' == 10";
+    Reader reader("constant.c", source);
+    lexer::LexerMgr mgr(reader);
+    auto lexer = mgr.get_lexer();
+
+    auto expression = parser::Expression::parse(lexer);
+    REQUIRE(expression != nullptr);
+
+    auto value = semantic::Constant_evaluator::evaluate(*expression);
+    REQUIRE(value.has_value());
+    CHECK(value->value == 1);
+}
+
+TEST_CASE("preprocessor constant expression uses shared integer operations") {
+    auto value =
+        preprocessor::Constant_expression("1 + 2 * 3 == 7 && !0")
+            .evaluate();
+
+    REQUIRE(value.has_value());
+    CHECK(value->value == 1);
+    CHECK_FALSE(
+        preprocessor::Constant_expression("1 / 0")
+            .evaluate()
+            .has_value());
 }

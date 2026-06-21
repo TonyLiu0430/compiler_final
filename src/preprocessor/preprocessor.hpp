@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "lexer/scanner.hpp"
+#include "preprocessor/constant_expression.hpp"
 
 namespace c9ay::preprocessor {
 
@@ -30,14 +31,6 @@ class Preprocessor {
 
     std::unordered_map<std::string, Macro> macros;
     std::vector<std::filesystem::path> include_paths;
-
-    static bool is_identifier_start(char ch) {
-        return scanner::is_identifier_start(ch);
-    }
-
-    static bool is_identifier_char(char ch) {
-        return scanner::is_identifier_char(ch);
-    }
 
     static scanner::Token next_non_trivia(
         std::string_view text,
@@ -281,173 +274,11 @@ class Preprocessor {
         return result;
     }
 
-    class Condition_parser {
-        std::string_view text;
-        int cnt = 0;
-
-        void skip_space() {
-            while (cnt < static_cast<int>(text.size()) &&
-                   std::isspace(static_cast<unsigned char>(text[cnt]))) {
-                cnt++;
-            }
-        }
-
-        bool consume(std::string_view op) {
-            skip_space();
-            if (text.substr(cnt).starts_with(op)) {
-                cnt += static_cast<int>(op.size());
-                return true;
-            }
-            return false;
-        }
-
-        long long primary() {
-            skip_space();
-            if (consume("(")) {
-                long long value = logical_or();
-                consume(")");
-                return value;
-            }
-            if (cnt < static_cast<int>(text.size()) &&
-                std::isdigit(static_cast<unsigned char>(text[cnt]))) {
-                long long value = 0;
-                while (cnt < static_cast<int>(text.size()) &&
-                       std::isdigit(static_cast<unsigned char>(text[cnt]))) {
-                    value = value * 10 + (text[cnt++] - '0');
-                }
-                return value;
-            }
-            if (cnt < static_cast<int>(text.size()) &&
-                is_identifier_start(text[cnt])) {
-                cnt++;
-                while (cnt < static_cast<int>(text.size()) &&
-                       is_identifier_char(text[cnt])) {
-                    cnt++;
-                }
-            }
-            return 0;
-        }
-
-        long long unary() {
-            if (consume("!")) return !unary();
-            if (consume("~")) return ~unary();
-            if (consume("+")) return unary();
-            if (consume("-")) return -unary();
-            return primary();
-        }
-
-        long long multiplicative() {
-            long long lhs = unary();
-            while (1) {
-                if (consume("*")) lhs *= unary();
-                else if (consume("/")) {
-                    long long rhs = unary();
-                    lhs = rhs == 0 ? 0 : lhs / rhs;
-                }
-                else if (consume("%")) {
-                    long long rhs = unary();
-                    lhs = rhs == 0 ? 0 : lhs % rhs;
-                }
-                else return lhs;
-            }
-        }
-
-        long long additive() {
-            long long lhs = multiplicative();
-            while (1) {
-                if (consume("+")) lhs += multiplicative();
-                else if (consume("-")) lhs -= multiplicative();
-                else return lhs;
-            }
-        }
-
-        long long shift() {
-            long long lhs = additive();
-            while (1) {
-                if (consume("<<")) lhs <<= additive();
-                else if (consume(">>")) lhs >>= additive();
-                else return lhs;
-            }
-        }
-
-        long long relational() {
-            long long lhs = shift();
-            while (1) {
-                if (consume("<=")) lhs = lhs <= shift();
-                else if (consume(">=")) lhs = lhs >= shift();
-                else if (consume("<")) lhs = lhs < shift();
-                else if (consume(">")) lhs = lhs > shift();
-                else return lhs;
-            }
-        }
-
-        long long equality() {
-            long long lhs = relational();
-            while (1) {
-                if (consume("==")) lhs = lhs == relational();
-                else if (consume("!=")) lhs = lhs != relational();
-                else return lhs;
-            }
-        }
-
-        long long bit_and() {
-            long long lhs = equality();
-            while (1) {
-                skip_space();
-                if (text.substr(cnt).starts_with("&&") || !consume("&")) {
-                    return lhs;
-                }
-                lhs &= equality();
-            }
-        }
-
-        long long bit_xor() {
-            long long lhs = bit_and();
-            while (consume("^")) lhs ^= bit_and();
-            return lhs;
-        }
-
-        long long bit_or() {
-            long long lhs = bit_xor();
-            while (1) {
-                skip_space();
-                if (text.substr(cnt).starts_with("||") || !consume("|")) {
-                    return lhs;
-                }
-                lhs |= bit_xor();
-            }
-        }
-
-        long long logical_and() {
-            long long lhs = bit_or();
-            while (consume("&&")) {
-                long long rhs = bit_or();
-                lhs = lhs && rhs;
-            }
-            return lhs;
-        }
-
-        long long logical_or() {
-            long long lhs = logical_and();
-            while (consume("||")) {
-                long long rhs = logical_and();
-                lhs = lhs || rhs;
-            }
-            return lhs;
-        }
-
-    public:
-        Condition_parser(std::string_view _text) : text(_text) {}
-
-        long long parse() {
-            return logical_or();
-        }
-    };
-
     bool evaluate_condition(std::string_view expression) {
         std::string replaced = replace_defined(expression);
         std::string expanded = expand_text(replaced);
-        return Condition_parser(expanded).parse() != 0;
+        auto value = Constant_expression(expanded).evaluate();
+        return value && value->value != 0;
     }
 
     void define_macro(std::string_view body) {
