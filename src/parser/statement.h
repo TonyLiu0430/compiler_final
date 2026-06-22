@@ -3,13 +3,62 @@
 #include <meta>
 #include <memory>
 #include <optional>
+#include <string>
 #include <string_view>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
 #include "parser/expression.h"
 
 namespace c9ay::parser {
+
+namespace type_names {
+
+inline thread_local std::vector<std::unordered_set<std::string>> scopes;
+
+inline void reset() {
+    scopes.clear();
+    scopes.emplace_back();
+}
+
+inline void push_scope() {
+    if (scopes.empty()) reset();
+    scopes.emplace_back();
+}
+
+inline void pop_scope() {
+    scopes.pop_back();
+}
+
+inline bool contains(std::string_view name) {
+    if (name == "void" ||
+        name == "char" ||
+        name == "int") {
+        return true;
+    }
+    for (int i = static_cast<int>(scopes.size()) - 1; i >= 0; i--) {
+        if (scopes[i].contains(std::string(name))) return true;
+    }
+    return false;
+}
+
+inline void add(std::string_view name) {
+    if (scopes.empty()) reset();
+    scopes.back().insert(std::string(name));
+}
+
+struct Scope {
+    Scope() {
+        push_scope();
+    }
+
+    ~Scope() {
+        pop_scope();
+    }
+};
+
+}  // namespace type_names
 
 struct Statement : Node {
     static std::unique_ptr<Statement> match(lexer::Lexer &lexer);
@@ -281,8 +330,22 @@ inline std::optional<Declaration_specifiers> match_declaration_specifiers(
     };
 }
 
+inline bool can_start_declarator(lexer::Lexer lexer);
+
 inline bool can_start_declaration(lexer::Lexer lexer) {
-    return match_declaration_specifiers(lexer).has_value();
+    auto specifiers = match_declaration_specifiers(lexer);
+    if (!specifiers) return false;
+    if (type_names::contains(specifiers->type.raw)) {
+        return can_start_declarator(lexer);
+    }
+
+    while (lexer.has_next() &&
+           lexer.peek_next().raw.size() == 1 &&
+           lexer.peek_next().match<lexer::token_type::OPERATOR>('*')) {
+        lexer.next_token();
+    }
+    return lexer.has_next() &&
+           lexer.peek_next().match<lexer::token_type::IDENTIFIER>();
 }
 
 inline bool can_start_declarator(lexer::Lexer lexer) {
@@ -784,9 +847,7 @@ inline std::unique_ptr<Initializer> Initializer::match(lexer::Lexer &lexer) {
 }
 
 inline std::unique_ptr<Declvariable> Declvariable::try_match(lexer::Lexer &lexer) {
-    lexer::Lexer probe = lexer;
-    if (!match_declaration_specifiers(probe)) return nullptr;
-    if (!can_start_declarator(probe)) return nullptr;
+    if (!can_start_declaration(lexer)) return nullptr;
 
     lexer::Lexer cur_state = lexer;
     auto result = match(cur_state);
@@ -835,10 +896,16 @@ inline std::unique_ptr<Declvariable> Declvariable::match(lexer::Lexer &lexer) {
     if (!expect_punctuarter(lexer, ';', "expect ';' after varible declaration")) {
         return nullptr;
     }
+    if (cur->is_typedef) {
+        for (auto &item : cur->declarators) {
+            type_names::add(item->declarator->name.raw);
+        }
+    }
     return cur;
 }
 
 inline std::unique_ptr<Block> Block::match(lexer::Lexer &lexer) {
+    type_names::Scope type_scope;
     auto cur = std::make_unique<Block>();
     assert_c9ay(lexer.next_token().match<lexer::token_type::PUNCTUATOR>('{'));
 
@@ -895,6 +962,7 @@ inline std::unique_ptr<Function_definition> Function_definition::try_match(
 }
 
 inline std::unique_ptr<Program> Program::match(lexer::Lexer &lexer) {
+    type_names::reset();
     auto cur = std::make_unique<Program>();
     while (lexer.has_next()) {
         if (auto function = Function_definition::try_match(lexer)) {

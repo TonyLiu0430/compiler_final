@@ -103,7 +103,8 @@ public:
 
     static void link_executable(
         const std::filesystem::path &object,
-        const std::filesystem::path &executable) {
+        const std::filesystem::path &executable,
+        const std::vector<std::filesystem::path> &libraries = {}) {
         auto gcc = llvm::sys::findProgramByName("gcc");
         if (!gcc) {
             throw std::runtime_error(
@@ -112,10 +113,13 @@ public:
 
         std::vector<std::string> arguments_storage = {
             *gcc,
-            object.string(),
-            "-o",
-            executable.string()
+            object.string()
         };
+        for (auto &library : libraries) {
+            arguments_storage.push_back(library.string());
+        }
+        arguments_storage.push_back("-o");
+        arguments_storage.push_back(executable.string());
         std::vector<llvm::StringRef> arguments;
         for (auto &argument : arguments_storage) {
             arguments.emplace_back(argument);

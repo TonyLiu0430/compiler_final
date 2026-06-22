@@ -706,7 +706,10 @@ public:
         auto object = path;
         object += ".o";
         emit_object(object);
-        LLVM_target::link_executable(object, path);
+        LLVM_target::link_executable(
+            object,
+            path,
+            {C9AY_RUNTIME_OBJECT});
         std::filesystem::remove(object);
     }
 };

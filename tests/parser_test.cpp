@@ -2,9 +2,13 @@
 #include "doctest.h"
 
 #include <filesystem>
+#include <fstream>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
+
+#include <llvm/Support/Program.h>
 
 #include "codegen/llvm_codegen.hpp"
 #include "parser/parser.h"
@@ -1408,4 +1412,73 @@ TEST_CASE("compatible repeated function prototypes share one symbol") {
 
     codegen::LLVM_codegen codegen("repeated_prototype");
     CHECK_NOTHROW(codegen.generate(*program));
+}
+
+TEST_CASE("c9ay runtime prints observable console output") {
+    std::string source = R"(
+        #include <c9ay.h>
+
+        int main() {
+            print("text:");
+            printInt(42);
+            writeChar(' ');
+            printInt(-7);
+            writeChar(' ');
+            printInt(-2147483647 - 1);
+            printLine("");
+            return 0;
+        }
+    )";
+
+    preprocessor::Preprocessor preprocessor;
+    preprocessor.add_include_path(C9AY_INCLUDE_DIR);
+    std::string processed = preprocessor.process(
+        source,
+        "runtime-output.c");
+
+    Reader reader("runtime-output.c", processed);
+    lexer::LexerMgr mgr(reader);
+    auto lexer = mgr.get_lexer();
+    auto program = parser::Program::match(lexer);
+
+    auto directory = std::filesystem::temp_directory_path();
+    auto executable = directory / "c9ay-runtime-output.exe";
+    auto output = directory / "c9ay-runtime-output.txt";
+    auto error = directory / "c9ay-runtime-error.txt";
+    std::filesystem::remove(executable);
+    std::filesystem::remove(output);
+    std::filesystem::remove(error);
+
+    codegen::LLVM_codegen codegen("runtime_output");
+    codegen.generate(*program);
+    codegen.emit_executable(executable);
+
+    std::string program_path = executable.string();
+    std::string output_path = output.string();
+    std::string error_path = error.string();
+    std::vector<llvm::StringRef> arguments = {
+        program_path
+    };
+    std::vector<std::optional<llvm::StringRef>> redirects = {
+        std::nullopt,
+        output_path,
+        error_path
+    };
+    int result = llvm::sys::ExecuteAndWait(
+        program_path,
+        arguments,
+        std::nullopt,
+        redirects);
+
+    CHECK(result == 0);
+    std::ifstream output_file(output, std::ios::binary);
+    std::string text{
+        std::istreambuf_iterator<char>(output_file),
+        std::istreambuf_iterator<char>()};
+    CHECK(text == "text:42 -7 -2147483648\n");
+    output_file.close();
+
+    std::filesystem::remove(executable);
+    std::filesystem::remove(output);
+    std::filesystem::remove(error);
 }

@@ -25,6 +25,23 @@ endif()
 
 add_executable(compiler ${SOURCES} ${HEADERS}) # add header to let vscode intellisense work well
 
+set(C9AY_RUNTIME_DIRECTORY "${CMAKE_BINARY_DIR}/runtime")
+set(C9AY_RUNTIME_OBJECT
+    "${C9AY_RUNTIME_DIRECTORY}/c9ay_runtime.o"
+)
+file(TO_CMAKE_PATH
+    "${CMAKE_CURRENT_SOURCE_DIR}/runtime"
+    C9AY_INCLUDE_DIRECTORY_DEFINE
+)
+file(TO_CMAKE_PATH
+    "${C9AY_RUNTIME_OBJECT}"
+    C9AY_RUNTIME_OBJECT_DEFINE
+)
+target_compile_definitions(compiler PRIVATE
+    C9AY_INCLUDE_DIR="${C9AY_INCLUDE_DIRECTORY_DEFINE}"
+    C9AY_RUNTIME_OBJECT="${C9AY_RUNTIME_OBJECT_DEFINE}"
+)
+
 if(ENABLE_LLVM_CODEGEN)
     set(C9AY_LLVM_DIR
         "${CMAKE_BINARY_DIR}/llvm/lib/cmake/llvm"
@@ -140,9 +157,35 @@ if(MINGW AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     target_link_options(compiler PRIVATE -s)
 endif()
 
+add_custom_command(
+    OUTPUT "${C9AY_RUNTIME_OBJECT}"
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+        "${C9AY_RUNTIME_DIRECTORY}"
+    COMMAND $<TARGET_FILE:compiler>
+        "${CMAKE_CURRENT_SOURCE_DIR}/runtime/c9ay_runtime.c"
+        -c
+        -o
+        "${C9AY_RUNTIME_OBJECT}"
+    DEPENDS
+        compiler
+        "${CMAKE_CURRENT_SOURCE_DIR}/runtime/c9ay_runtime.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/runtime/c9ay.h"
+    COMMENT
+        "Building c9ay runtime with the c9ay compiler"
+    VERBATIM
+)
+add_custom_target(c9ay_runtime ALL
+    DEPENDS "${C9AY_RUNTIME_OBJECT}"
+)
+
 include(CTest)
 if(BUILD_TESTING)
     add_executable(compiler_tests tests/parser_test.cpp)
+    add_dependencies(compiler_tests c9ay_runtime)
+    target_compile_definitions(compiler_tests PRIVATE
+        C9AY_INCLUDE_DIR="${C9AY_INCLUDE_DIRECTORY_DEFINE}"
+        C9AY_RUNTIME_OBJECT="${C9AY_RUNTIME_OBJECT_DEFINE}"
+    )
 
     if(ENABLE_LLVM_CODEGEN)
         target_link_libraries(compiler_tests PRIVATE c9ay_llvm)

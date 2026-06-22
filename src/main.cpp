@@ -33,11 +33,15 @@ int main(int argc, char **argv) {
         std::filesystem::path output;
         bool emit_llvm = false;
         bool compile_only = false;
+        bool preprocess_only = false;
 
         for (int i = 1; i < argc; i++) {
             std::string_view argument = argv[i];
             if (argument == "--emit-llvm") {
                 emit_llvm = true;
+            }
+            else if (argument == "-E") {
+                preprocess_only = true;
             }
             else if (argument == "-c") {
                 compile_only = true;
@@ -55,7 +59,18 @@ int main(int argc, char **argv) {
         }
 
         preprocessor::Preprocessor preprocessor;
+        preprocessor.add_include_path(C9AY_INCLUDE_DIR);
         std::string content = preprocessor.process_file(path);
+        if (preprocess_only) {
+            if (output.empty()) {
+                std::print("{}", content);
+            }
+            else {
+                std::ofstream file(output);
+                file << content;
+            }
+            return 0;
+        }
         std::string path_text = path.string();
         Reader reader(path_text, content);
         lexer::LexerMgr manager(reader);
