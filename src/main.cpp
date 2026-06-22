@@ -81,9 +81,11 @@ int main(int argc, char **argv) {
         Reader source_reader(path_text, raw_content);
         preprocessor::Preprocessor preprocessor;
         preprocessor.add_include_path(C9AY_INCLUDE_DIR);
-        std::string content;
+        preprocessor::Preprocessed_source processed;
         try {
-            content = preprocessor.process(source_reader, path);
+            processed = preprocessor.process_mapped(
+                source_reader,
+                path);
         }
         catch (const std::exception &) {
             source_reader.diagnostic().print(std::cerr);
@@ -91,15 +93,18 @@ int main(int argc, char **argv) {
         }
         if (preprocess_only) {
             if (output.empty()) {
-                std::print("{}", content);
+                std::print("{}", processed.text);
             }
             else {
                 std::ofstream file(output);
-                file << content;
+                file << processed.text;
             }
             return 0;
         }
-        Reader reader(path_text, content);
+        Reader reader(
+            path_text,
+            processed.text,
+            processed.source_map);
         lexer::LexerMgr manager(reader);
         auto lexer = manager.get_lexer();
         auto program = parser::Program::match(lexer);
@@ -124,8 +129,8 @@ int main(int argc, char **argv) {
                 Diagnostic_level::FATAL_LEVEL,
                 error.what(),
                 {
-                    static_cast<int>(content.size()),
-                    static_cast<int>(content.size())
+                    static_cast<int>(processed.text.size()),
+                    static_cast<int>(processed.text.size())
                 });
             reader.diagnostic().print(std::cerr);
             return 1;

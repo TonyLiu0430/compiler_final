@@ -184,11 +184,15 @@ add_custom_target(c9ay_runtime ALL
 
 include(CTest)
 if(BUILD_TESTING)
-    add_executable(compiler_tests tests/parser_test.cpp)
+    add_executable(compiler_tests
+        tests/parser_test.cpp
+        tests/fixture_test.cpp
+    )
     add_dependencies(compiler_tests c9ay_runtime)
     target_compile_definitions(compiler_tests PRIVATE
         C9AY_INCLUDE_DIR="${C9AY_INCLUDE_DIRECTORY_DEFINE}"
         C9AY_RUNTIME_OBJECT="${C9AY_RUNTIME_OBJECT_DEFINE}"
+        C9AY_TEST_DIRECTORY="${CMAKE_CURRENT_SOURCE_DIR}/test"
     )
 
     if(ENABLE_LLVM_CODEGEN)

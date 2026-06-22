@@ -9,6 +9,8 @@
 #include <utility>
 #include <vector>
 
+#include "diagnostic/source_map.hpp"
+
 namespace c9ay {
 
 enum class Diagnostic_level {
@@ -32,6 +34,7 @@ struct Diagnostic_message {
 class Diagnostic {
     std::string file_name;
     std::string_view source;
+    std::shared_ptr<Source_map> source_map;
     std::vector<int> line_starts{0};
     std::vector<Diagnostic_message> messages;
     std::unordered_set<std::string> keys;
@@ -88,9 +91,11 @@ public:
 
     Diagnostic(
         std::string_view _file_name,
-        std::string_view _source)
+        std::string_view _source,
+        std::shared_ptr<Source_map> _source_map = nullptr)
         : file_name(_file_name),
-          source(_source) {
+          source(_source),
+          source_map(std::move(_source_map)) {
         for (int i = 0; i < static_cast<int>(source.size()); i++) {
             if (source[i] == '\n') line_starts.push_back(i + 1);
         }
@@ -186,11 +191,63 @@ public:
     }
 
     std::string format(const Diagnostic_message &diagnostic) const {
-        auto [line, column] = locate(diagnostic.range.begin);
-        auto text = source_line(line);
+        std::string mapped_file_name = file_name;
+        std::string_view mapped_source = source;
+        std::vector<int> mapped_line_starts = line_starts;
+        int mapped_begin = diagnostic.range.begin;
+        int mapped_end = diagnostic.range.end;
+        std::vector<Include_site> include_stack;
+
+        if (source_map) {
+            auto begin = source_map->map(diagnostic.range.begin);
+            auto end = source_map->map(
+                std::max(
+                    diagnostic.range.begin,
+                    diagnostic.range.end - 1));
+            if (begin.file) {
+                mapped_file_name = begin.file->name;
+                mapped_source = begin.file->source;
+                mapped_line_starts = begin.file->line_starts;
+                mapped_begin = begin.position;
+                mapped_end =
+                    end.file == begin.file
+                        ? end.position + 1
+                        : begin.position + 1;
+                include_stack = std::move(begin.include_stack);
+            }
+        }
+
+        auto locate_mapped = [&](int position) {
+            position = std::clamp(
+                position,
+                0,
+                static_cast<int>(mapped_source.size()));
+            int line = static_cast<int>(
+                std::upper_bound(
+                    mapped_line_starts.begin(),
+                    mapped_line_starts.end(),
+                    position) -
+                mapped_line_starts.begin()) - 1;
+            return std::pair(
+                line,
+                position - mapped_line_starts[line]);
+        };
+        auto [line, column] = locate_mapped(mapped_begin);
+        int line_begin = mapped_line_starts[line];
+        int line_end =
+            line + 1 < static_cast<int>(mapped_line_starts.size())
+                ? mapped_line_starts[line + 1] - 1
+                : static_cast<int>(mapped_source.size());
+        if (line_end > line_begin &&
+            mapped_source[line_end - 1] == '\r') {
+            line_end--;
+        }
+        auto text = mapped_source.substr(
+            line_begin,
+            line_end - line_begin);
         int width = std::max(
             1,
-            diagnostic.range.end - diagnostic.range.begin);
+            mapped_end - mapped_begin);
         width = std::min(
             width,
             std::max(1, static_cast<int>(text.size()) - column));
@@ -206,11 +263,30 @@ public:
         marker.push_back('^');
         marker.append(width - 1, '~');
 
-        return std::format(
+        std::string result;
+        if (!include_stack.empty()) {
+            for (int i = 0;
+                 i < static_cast<int>(include_stack.size());
+                 i++) {
+                auto &site = include_stack[i];
+                auto &file = source_map->file(site.file);
+                auto [include_line, include_column] =
+                    file.locate(site.position);
+                result += std::format(
+                    "{}{}:{}:{}:\n",
+                    i == 0
+                        ? "In file included from "
+                        : "                 from ",
+                    file.name,
+                    include_line + 1,
+                    include_column + 1);
+            }
+        }
+        result += std::format(
             "{}:{}:{}: {}: {}\n"
             " {:>{}} | {}\n"
             " {} | {}\n",
-            file_name,
+            mapped_file_name,
             line + 1,
             column + 1,
             level_name(diagnostic.level),
@@ -223,6 +299,7 @@ public:
                 std::to_string(line + 1).size(),
                 ' '),
             marker);
+        return result;
     }
 
     std::string format_all() const {

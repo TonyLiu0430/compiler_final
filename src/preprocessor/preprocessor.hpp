@@ -24,6 +24,11 @@ struct Macro {
     std::string replacement;
 };
 
+struct Preprocessed_source {
+    std::string text;
+    std::shared_ptr<Source_map> source_map;
+};
+
 class Preprocessor {
     struct Conditional_state {
         bool parent_active;
@@ -491,7 +496,11 @@ class Preprocessor {
 
     std::string process_source(
         std::string_view source,
-        const std::filesystem::path &current_file) {
+        const std::filesystem::path &current_file,
+        Source_map *source_map = nullptr,
+        int source_file = -1,
+        const std::vector<Include_site> &include_stack = {},
+        int output_base = 0) {
         std::string spliced = splice_lines(source);
         std::string result;
         std::vector<Conditional_state> conditions;
@@ -594,7 +603,30 @@ class Preprocessor {
                         current_file);
                     auto include_range = current_range;
                     try {
-                        result += process_source(read_file(path), path);
+                        auto included_source = read_file(path);
+                        int included_file = source_map
+                            ? source_map->add_file(
+                                  path.string(),
+                                  included_source)
+                            : -1;
+                        auto child_stack = include_stack;
+                        if (source_map) {
+                            child_stack.push_back({
+                                source_file,
+                                begin +
+                                    static_cast<int>(
+                                        content.data() - line.data()) +
+                                    hash.left
+                            });
+                        }
+                        result += process_source(
+                            included_source,
+                            path,
+                            source_map,
+                            included_file,
+                            child_stack,
+                            output_base +
+                                static_cast<int>(result.size()));
                     }
                     catch (...) {
                         current_range = include_range;
@@ -606,11 +638,37 @@ class Preprocessor {
                 }
             }
             else if (active) {
-                result += expand_text(line);
+                auto expanded = expand_text(line);
+                int output_begin =
+                    output_base + static_cast<int>(result.size());
+                result += expanded;
                 if (has_newline) result.push_back('\n');
+                if (source_map) {
+                    source_map->add_mapping({
+                        output_begin,
+                        output_base +
+                            static_cast<int>(result.size()),
+                        source_file,
+                        begin,
+                        end,
+                        include_stack
+                    });
+                }
             }
             else if (has_newline) {
+                int output_begin =
+                    output_base + static_cast<int>(result.size());
                 result.push_back('\n');
+                if (source_map) {
+                    source_map->add_mapping({
+                        output_begin,
+                        output_begin + 1,
+                        source_file,
+                        begin,
+                        end,
+                        include_stack
+                    });
+                }
             }
 
             if (!has_newline) break;
@@ -639,6 +697,31 @@ public:
         const std::filesystem::path &file_name = {}) {
         try {
             return process_source(reader.get_raw(), file_name);
+        }
+        catch (const std::exception &error) {
+            reader.diagnostic().error(
+                error.what(),
+                current_range);
+            throw;
+        }
+    }
+
+    Preprocessed_source process_mapped(
+        Reader &reader,
+        const std::filesystem::path &file_name = {}) {
+        auto source_map = std::make_shared<Source_map>();
+        int main_file = source_map->add_file(
+            reader.get_file_name(),
+            reader.get_raw());
+        try {
+            return {
+                process_source(
+                    reader.get_raw(),
+                    file_name,
+                    source_map.get(),
+                    main_file),
+                std::move(source_map)
+            };
         }
         catch (const std::exception &error) {
             reader.diagnostic().error(

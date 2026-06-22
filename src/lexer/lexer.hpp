@@ -112,7 +112,7 @@ constexpr bool matches_keyword(std::string_view key, std::string_view enumerator
 
 }  // namespace reflect
 
-token_type keyword_mapping(std::string_view key) {
+inline token_type keyword_mapping(std::string_view key) {
     template for (constexpr auto enumerator :
                   std::define_static_array(
                       std::meta::enumerators_of(^^token_type))) {
@@ -126,11 +126,11 @@ token_type keyword_mapping(std::string_view key) {
     return token_type::IDENTIFIER;
 }
 
-bool is_punctuarter(char ch) {
+inline bool is_punctuarter(char ch) {
     return is_one_of<"{}#;">(ch);
 }
 
-void validate_escape_sequence(
+inline void validate_escape_sequence(
     Reader &reader,
     scanner::Token token) {
     for (int i = 1; i + 1 < static_cast<int>(token.raw.size()); i++) {
@@ -144,7 +144,7 @@ void validate_escape_sequence(
     }
 }
 
-Token next_token(Reader &reader) {
+inline Token next_token(Reader &reader) {
     while (1) {
         int cnt = reader.get_cnt();
         scanner::Token token =

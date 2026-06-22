@@ -357,21 +357,33 @@ inline std::unique_ptr<Expression> Expression::parse(lexer::Lexer &lexer, int mi
         else {
             if (token.match<lexer::token_type::K_ALIGNOF>()) {
                 lexer.report_error("alignof requires a type name");
-                return nullptr;
+                auto ignored = parse(lexer);
+                if (!ignored) {
+                    ignored = recover(lexer);
+                }
+                if (!expect_operator(
+                        lexer,
+                        ')',
+                        "expect ')' after alignof operand")) {
+                    return nullptr;
+                }
+                lhs = std::make_unique<Error_expression>();
             }
-            auto operand = parse(lexer);
-            if (!operand) {
-                operand = recover(lexer);
+            else {
+                auto operand = parse(lexer);
+                if (!operand) {
+                    operand = recover(lexer);
+                }
+                if (!expect_operator(
+                        lexer,
+                        ')',
+                        "expect ')' after sizeof expression")) {
+                    return nullptr;
+                }
+                lhs = std::make_unique<Type_query_expression>(
+                    token,
+                    std::move(operand));
             }
-            if (!expect_operator(
-                    lexer,
-                    ')',
-                    "expect ')' after sizeof expression")) {
-                return nullptr;
-            }
-            lhs = std::make_unique<Type_query_expression>(
-                token,
-                std::move(operand));
         }
     }
     else if (token.raw.size() == 1 &&

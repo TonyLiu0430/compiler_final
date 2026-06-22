@@ -18,15 +18,15 @@ constexpr bool is_one_of(char ch) {
     return false;
 }
 
-bool is_alphabet(char ch) {
+inline bool is_alphabet(char ch) {
     return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z');
 }
 
-bool is_digit(char ch) {
+inline bool is_digit(char ch) {
     return ch >= '0' && ch <= '9';
 }
 
-bool is_ws_endl(char ch) {
+inline bool is_ws_endl(char ch) {
     return is_one_of<" \t\n\r">(ch);
 }
 }  // namespace c9ay

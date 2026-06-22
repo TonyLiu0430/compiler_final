@@ -7,7 +7,7 @@
 
 namespace c9ay::parser::type_names {
 
-inline thread_local std::vector<std::unordered_set<std::string>> scopes;
+static thread_local std::vector<std::unordered_set<std::string>> scopes;
 
 inline void reset() {
     scopes.clear();

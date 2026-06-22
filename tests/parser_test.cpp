@@ -747,7 +747,7 @@ TEST_CASE("preprocessor expansion follows scanner token boundaries") {
 TEST_CASE("preprocessor handles undef and include guards") {
     preprocessor::Preprocessor preprocessor;
     auto fixture =
-        std::filesystem::path(__FILE__).parent_path() / "fixtures";
+        std::filesystem::path(C9AY_TEST_DIRECTORY) / "fixtures";
     preprocessor.add_include_path(fixture);
 
     std::string source = R"(
@@ -765,6 +765,78 @@ TEST_CASE("preprocessor handles undef and include guards") {
               result.find("int included_declaration;") + 1) ==
           std::string::npos);
     CHECK(result.find("int value = 9;") != std::string::npos);
+}
+
+TEST_CASE("source map preserves locations across includes") {
+    auto fixture =
+        std::filesystem::path(C9AY_TEST_DIRECTORY) / "fixtures";
+    auto main_file = fixture / "mapped-main.c";
+    std::string source = R"(#include "preprocessor_value.h"
+int main() {
+    return missing;
+}
+)";
+
+    Reader source_reader(main_file.string(), source);
+    preprocessor::Preprocessor preprocessor;
+    preprocessor.add_include_path(fixture);
+    auto processed = preprocessor.process_mapped(
+        source_reader,
+        main_file);
+    Reader reader(
+        main_file.string(),
+        processed.text,
+        processed.source_map);
+    lexer::LexerMgr mgr(reader);
+    auto lexer = mgr.get_lexer();
+    auto program = parser::Program::match(lexer);
+
+    REQUIRE(program != nullptr);
+    REQUIRE_FALSE(reader.diagnostic().has_error());
+
+    semantic::Semantic_analyzer analyzer;
+    CHECK_THROWS_AS(
+        analyzer.analyze(*program, &reader.diagnostic()),
+        semantic::Compile_error);
+    auto output = reader.diagnostic().format_all();
+    INFO(output);
+    CHECK(output.find("mapped-main.c:3:12: error:") !=
+          std::string::npos);
+    CHECK(output.find("return missing;") != std::string::npos);
+}
+
+TEST_CASE("source map reports errors inside included files") {
+    auto fixture =
+        std::filesystem::path(C9AY_TEST_DIRECTORY) / "fixtures";
+    auto main_file = fixture / "include-error-main.c";
+    std::string source = R"(#include "diagnostic_invalid.h"
+int main() {
+    return 0;
+}
+)";
+
+    Reader source_reader(main_file.string(), source);
+    preprocessor::Preprocessor preprocessor;
+    preprocessor.add_include_path(fixture);
+    auto processed = preprocessor.process_mapped(
+        source_reader,
+        main_file);
+    Reader reader(
+        main_file.string(),
+        processed.text,
+        processed.source_map);
+    lexer::LexerMgr mgr(reader);
+    auto lexer = mgr.get_lexer();
+    parser::Program::match(lexer);
+
+    REQUIRE(reader.diagnostic().has_error());
+    auto output = reader.diagnostic().format_all();
+    CHECK(output.find("In file included from") != std::string::npos);
+    CHECK(output.find("include-error-main.c:1:1") !=
+          std::string::npos);
+    CHECK(output.find("diagnostic_invalid.h:1:14: error:") !=
+          std::string::npos);
+    CHECK(output.find("int broken = ;") != std::string::npos);
 }
 
 TEST_CASE("preprocessor supports stringify token paste and variadic macros") {

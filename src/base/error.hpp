@@ -14,7 +14,7 @@ public:
     explicit invalid_argument(const char* what_arg) : std::invalid_argument(what_arg) {}
 };
 
-void assert_c9ay(bool b, const std::string& what_arg = "") {
+inline void assert_c9ay(bool b, const std::string& what_arg = "") {
     if (!b) {
         throw internal_error(what_arg);
     }

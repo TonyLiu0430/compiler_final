@@ -10,7 +10,7 @@
 namespace c9ay {
 
 class Reader {
-    std::string_view file_name;
+    std::string file_name;
     std::string_view raw;
     std::shared_ptr<Diagnostic> diagnostics;
     int cnt = 0;
@@ -18,12 +18,14 @@ class Reader {
 public:
     Reader(
         std::string_view _file,
-        std::string_view _raw)
+        std::string_view _raw,
+        std::shared_ptr<Source_map> source_map = nullptr)
         : file_name(_file),
           raw(_raw),
           diagnostics(std::make_shared<Diagnostic>(
               _file,
-              _raw)) {}
+              _raw,
+              std::move(source_map))) {}
 
     Reader(const Reader &other) = default;
 
