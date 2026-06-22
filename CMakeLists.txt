@@ -123,6 +123,10 @@ if(ENABLE_LLVM_CODEGEN)
         Support
         Target
         CodeGen
+        Analysis
+        TransformUtils
+        InstCombine
+        ScalarOpts
         MC
         AsmPrinter
         X86CodeGen

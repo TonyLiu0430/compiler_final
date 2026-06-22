@@ -21,6 +21,8 @@
 #include <llvm/Target/TargetOptions.h>
 #include <llvm/TargetParser/Host.h>
 
+#include "codegen/optimization.hpp"
+
 namespace c9ay::codegen {
 
 class LLVM_target {
@@ -40,7 +42,8 @@ class LLVM_target {
 
 public:
     static std::unique_ptr<llvm::TargetMachine> create(
-        llvm::Module &module) {
+        llvm::Module &module,
+        Optimization_level optimization_level) {
         initialize();
 
         std::string triple_name =
@@ -61,7 +64,9 @@ public:
                 "generic",
                 "",
                 options,
-                llvm::Reloc::PIC_));
+                llvm::Reloc::PIC_,
+                std::nullopt,
+                llvm_codegen_level(optimization_level)));
         if (!machine) {
             throw std::runtime_error(
                 "failed to create LLVM target machine");
@@ -74,8 +79,9 @@ public:
 
     static void emit_object(
         llvm::Module &module,
-        const std::filesystem::path &path) {
-        auto machine = create(module);
+        const std::filesystem::path &path,
+        Optimization_level optimization_level) {
+        auto machine = create(module, optimization_level);
 
         std::error_code error;
         llvm::raw_fd_ostream output(

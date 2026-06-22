@@ -2,6 +2,7 @@
 
 #include <filesystem>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -16,13 +17,22 @@
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
+#include <llvm/IR/LegacyPassManager.h>
+#include <llvm/IR/PassManager.h>
 #include <llvm/IR/Type.h>
 #include <llvm/IR/Value.h>
 #include <llvm/IR/Verifier.h>
+#include <llvm/InitializePasses.h>
+#include <llvm/PassRegistry.h>
 #include <llvm/Support/raw_ostream.h>
+#include <llvm/Transforms/InstCombine/InstCombine.h>
+#include <llvm/Transforms/Scalar.h>
+#include <llvm/Transforms/Scalar/GVN.h>
+#include <llvm/Transforms/Utils.h>
 
 #include "base/literal.hpp"
 #include "codegen/llvm_target.hpp"
+#include "codegen/optimization.hpp"
 #include "parser/parser.h"
 #include "parser/reflect_dispatch.hpp"
 #include "semantic/constant_evaluator.hpp"
@@ -48,6 +58,7 @@ class LLVM_codegen {
     llvm::Function *current_function = nullptr;
     semantic::Type_ptr current_return_type;
     semantic::Semantic_result semantic_result;
+    Optimization_level optimization_level;
 
     [[noreturn]] static void unsupported(std::string_view message) {
         throw std::runtime_error(
@@ -759,12 +770,55 @@ class LLVM_codegen {
         current_return_type.reset();
     }
 
+    void optimize() {
+        if (optimization_level == Optimization_level::O0) return;
+
+        static std::once_flag pass_initialization;
+        std::call_once(pass_initialization, [] {
+            auto &registry = *llvm::PassRegistry::getPassRegistry();
+            llvm::initializeCore(registry);
+            llvm::initializeAnalysis(registry);
+            llvm::initializeTransformUtils(registry);
+            llvm::initializeScalarOpts(registry);
+            llvm::initializeInstCombine(registry);
+        });
+
+        llvm::legacy::PassManager passes;
+        passes.add(llvm::createPromoteMemoryToRegisterPass());
+        passes.add(llvm::createSROAPass());
+        passes.add(llvm::createInstructionCombiningPass());
+        passes.add(llvm::createReassociatePass());
+        passes.add(llvm::createCFGSimplificationPass());
+
+        if (optimization_level == Optimization_level::O2 ||
+            optimization_level == Optimization_level::O3) {
+            passes.add(llvm::createGVNPass());
+            passes.add(llvm::createDeadStoreEliminationPass());
+            passes.add(llvm::createLICMPass());
+            passes.add(llvm::createInstructionCombiningPass());
+            passes.add(llvm::createCFGSimplificationPass());
+        }
+
+        if (optimization_level == Optimization_level::O3) {
+            passes.add(llvm::createLoopUnrollPass(3));
+            passes.add(llvm::createInstructionCombiningPass());
+            passes.add(llvm::createGVNPass());
+        }
+
+        passes.add(llvm::createDeadCodeEliminationPass());
+        passes.run(*module);
+    }
+
 public:
-    LLVM_codegen(std::string_view module_name)
+    LLVM_codegen(
+        std::string_view module_name,
+        Optimization_level _optimization_level =
+            Optimization_level::O0)
         : module(std::make_unique<llvm::Module>(
               llvm::StringRef(module_name.data(), module_name.size()),
               context)),
-          builder(context) {}
+          builder(context),
+          optimization_level(_optimization_level) {}
 
     llvm::Module &generate(const parser::Program &program) {
         semantic::Semantic_analyzer analyzer;
@@ -804,6 +858,11 @@ public:
         if (llvm::verifyModule(*module, &llvm::errs())) {
             throw std::runtime_error("invalid LLVM module");
         }
+        optimize();
+        if (llvm::verifyModule(*module, &llvm::errs())) {
+            throw std::runtime_error(
+                "LLVM optimization produced invalid module");
+        }
         return *module;
     }
 
@@ -816,7 +875,10 @@ public:
     }
 
     void emit_object(const std::filesystem::path &path) {
-        LLVM_target::emit_object(*module, path);
+        LLVM_target::emit_object(
+            *module,
+            path,
+            optimization_level);
     }
 
     void emit_executable(const std::filesystem::path &path) {

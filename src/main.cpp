@@ -34,6 +34,8 @@ int main(int argc, char **argv) {
         bool emit_llvm = false;
         bool compile_only = false;
         bool preprocess_only = false;
+        codegen::Optimization_level optimization_level =
+            codegen::Optimization_level::O0;
 
         for (int i = 1; i < argc; i++) {
             std::string_view argument = argv[i];
@@ -45,6 +47,22 @@ int main(int argc, char **argv) {
             }
             else if (argument == "-c") {
                 compile_only = true;
+            }
+            else if (argument == "-O0") {
+                optimization_level =
+                    codegen::Optimization_level::O0;
+            }
+            else if (argument == "-O1") {
+                optimization_level =
+                    codegen::Optimization_level::O1;
+            }
+            else if (argument == "-O2") {
+                optimization_level =
+                    codegen::Optimization_level::O2;
+            }
+            else if (argument == "-O3") {
+                optimization_level =
+                    codegen::Optimization_level::O3;
             }
             else if (argument == "-o") {
                 if (i + 1 >= argc) {
@@ -76,7 +94,9 @@ int main(int argc, char **argv) {
         lexer::LexerMgr manager(reader);
         auto lexer = manager.get_lexer();
         auto program = parser::Program::match(lexer);
-        codegen::LLVM_codegen codegen(path_text);
+        codegen::LLVM_codegen codegen(
+            path_text,
+            optimization_level);
         codegen.generate(*program);
 
         if (emit_llvm) {

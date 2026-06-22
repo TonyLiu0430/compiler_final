@@ -838,6 +838,41 @@ TEST_CASE("LLVM codegen emits verified IR for basic C") {
     CHECK(ir.find("ret i32") != std::string::npos);
 }
 
+TEST_CASE("LLVM optimization pipeline simplifies generated IR") {
+    std::string source = R"(
+        int calculate() {
+            int left = 20;
+            int right = 22;
+            int result = left + right;
+            return result;
+        }
+    )";
+
+    Reader reader("optimization.c", source);
+    lexer::LexerMgr mgr(reader);
+    auto lexer = mgr.get_lexer();
+    auto program = parser::Program::match(lexer);
+
+    REQUIRE(program != nullptr);
+    REQUIRE_FALSE(program->error_occur);
+
+    codegen::LLVM_codegen unoptimized(
+        "unoptimized",
+        codegen::Optimization_level::O0);
+    unoptimized.generate(*program);
+    auto unoptimized_ir = unoptimized.ir();
+
+    codegen::LLVM_codegen optimized(
+        "optimized",
+        codegen::Optimization_level::O2);
+    optimized.generate(*program);
+    auto optimized_ir = optimized.ir();
+
+    CHECK(unoptimized_ir.find("alloca") != std::string::npos);
+    CHECK(optimized_ir.find("alloca") == std::string::npos);
+    CHECK(optimized_ir.find("ret i32 42") != std::string::npos);
+}
+
 TEST_CASE("semantic analysis rejects unknown types before codegen") {
     std::string source = R"(
         Unknown global;
