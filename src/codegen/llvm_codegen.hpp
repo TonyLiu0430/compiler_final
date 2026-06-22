@@ -831,9 +831,11 @@ public:
           builder(context),
           optimization_level(_optimization_level) {}
 
-    llvm::Module &generate(const parser::Program &program) {
+    llvm::Module &generate(
+        const parser::Program &program,
+        Diagnostic *diagnostics = nullptr) {
         semantic::Semantic_analyzer analyzer;
-        semantic_result = analyzer.analyze(program);
+        semantic_result = analyzer.analyze(program, diagnostics);
 
         for (auto &external : program.external_declarations) {
             if (auto declaration =

@@ -815,10 +815,14 @@ inline std::unique_ptr<Initializer> Initializer::match(lexer::Lexer &lexer) {
 inline std::unique_ptr<Declvariable> Declvariable::try_match(lexer::Lexer &lexer) {
     if (!can_start_declaration(lexer)) return nullptr;
 
+    auto diagnostic_checkpoint = lexer.diagnostic().checkpoint();
     lexer::Lexer cur_state = lexer;
     auto result = match(cur_state);
     if (result) {
         lexer.sync(cur_state);
+    }
+    else {
+        lexer.diagnostic().rollback(diagnostic_checkpoint);
     }
     return result;
 }
@@ -944,9 +948,11 @@ inline std::unique_ptr<Block> Block::match(lexer::Lexer &lexer) {
 
 inline std::unique_ptr<Function_definition> Function_definition::try_match(
     lexer::Lexer &lexer) {
+    auto diagnostic_checkpoint = lexer.diagnostic().checkpoint();
     lexer::Lexer probe = lexer;
     auto probe_specifiers = match_declaration_specifiers(probe);
     if (!probe_specifiers || !can_start_declarator(probe)) {
+        lexer.diagnostic().rollback(diagnostic_checkpoint);
         return nullptr;
     }
 
@@ -955,8 +961,10 @@ inline std::unique_ptr<Function_definition> Function_definition::try_match(
         !is_function_definition_declarator(*probe_declarator) ||
         !probe.has_next() ||
         !probe.peek_next().match<lexer::token_type::PUNCTUATOR>('{')) {
+        lexer.diagnostic().rollback(diagnostic_checkpoint);
         return nullptr;
     }
+    lexer.diagnostic().rollback(diagnostic_checkpoint);
 
     auto specifiers = match_declaration_specifiers(lexer);
     if (!specifiers) return nullptr;

@@ -47,7 +47,29 @@ enum class token_type {
 struct Token {
     std::string_view raw;
     token_type type;
+    int left;
     int right;
+
+    Token() = default;
+
+    Token(
+        std::string_view _raw,
+        token_type _type,
+        int _right)
+        : raw(_raw),
+          type(_type),
+          left(_right - static_cast<int>(_raw.size())),
+          right(_right) {}
+
+    Token(
+        std::string_view _raw,
+        token_type _type,
+        int _left,
+        int _right)
+        : raw(_raw),
+          type(_type),
+          left(_left),
+          right(_right) {}
     template <token_type t>
     bool match(char c) const {
         if (type != t) return false;
@@ -136,22 +158,28 @@ Token next_token(Reader &reader) {
         }
 
         if (token.type == scanner::token_type::END) {
-            return Token("", token_type::END, token.right);
+            return Token("", token_type::END, token.left, token.right);
         }
         if (token.type == scanner::token_type::IDENTIFIER) {
             return Token(
                 token.raw,
                 keyword_mapping(token.raw),
+                token.left,
                 token.right);
         }
         if (token.type == scanner::token_type::NUMBER) {
-            return Token(token.raw, token_type::NUMBER, token.right);
+            return Token(
+                token.raw,
+                token_type::NUMBER,
+                token.left,
+                token.right);
         }
         if (token.type == scanner::token_type::STRING_CONSTANT) {
             validate_escape_sequence(reader, token);
             return Token(
                 token.raw,
                 token_type::STRING_CONSTANT,
+                token.left,
                 token.right);
         }
         if (token.type == scanner::token_type::CHAR_CONSTANT) {
@@ -159,6 +187,7 @@ Token next_token(Reader &reader) {
             return Token(
                 token.raw,
                 token_type::CHAR_CONSTANT,
+                token.left,
                 token.right);
         }
         if (token.type == scanner::token_type::PUNCTUATOR) {
@@ -167,22 +196,38 @@ Token next_token(Reader &reader) {
                 is_punctuarter(token.raw.front())
                     ? token_type::PUNCTUATOR
                     : token_type::OPERATOR;
-            return Token(token.raw, type, token.right);
+            return Token(token.raw, type, token.left, token.right);
         }
 
         if (!token.raw.empty() && token.raw.front() == '\'') {
-            reader.report_error("未閉合 char constant", token.left);
+            reader.report_error(
+                "unterminated character constant",
+                token.left,
+                token.right);
         }
         else if (!token.raw.empty() && token.raw.front() == '"') {
-            reader.report_error("未閉合 string constant", token.left);
+            reader.report_error(
+                "unterminated string literal",
+                token.left,
+                token.right);
         }
         else if (token.raw.starts_with("/*")) {
-            reader.report_error("unterminated block comment", token.left);
+            reader.report_error(
+                "unterminated block comment",
+                token.left,
+                token.right);
         }
         else {
-            reader.report_error("unknown character", token.left);
+            reader.report_error(
+                "stray character in program",
+                token.left,
+                token.right);
         }
-        return Token(token.raw, token_type::ERROR, token.right);
+        return Token(
+            token.raw,
+            token_type::ERROR,
+            token.left,
+            token.right);
     }
 }
 }  // namespace impl
@@ -225,11 +270,22 @@ public:
     void report_error(const std::string &error_msg, int idx) {
         fetch_token(idx);
         if (idx < static_cast<int>(tokens.size())) {
-            reader.report_error(error_msg, tokens[idx].right);
+            reader.report_error(
+                error_msg,
+                tokens[idx].left,
+                tokens[idx].right);
         }
         else {
             reader.report_error(error_msg);
         }
+    }
+
+    Diagnostic &diagnostic() {
+        return reader.diagnostic();
+    }
+
+    const Diagnostic &diagnostic() const {
+        return reader.diagnostic();
     }
 };
 
@@ -279,6 +335,10 @@ public:
     }
     void report_error(const std::string &s) {
         mgr.report_error(s, token_cnt);
+    }
+
+    Diagnostic &diagnostic() {
+        return mgr.diagnostic();
     }
 };
 

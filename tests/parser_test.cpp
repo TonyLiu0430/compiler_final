@@ -18,6 +18,36 @@
 
 using namespace c9ay;
 
+TEST_CASE("diagnostic renders GCC style source ranges") {
+    std::string source = "int main() {\n\treturn missing;\n}\n";
+    Reader reader("diagnostic.c", source);
+    int begin = static_cast<int>(source.find("missing"));
+    reader.report_error(
+        "use of undeclared identifier 'missing'",
+        begin,
+        begin + 7);
+
+    auto output = reader.diagnostic().format_all();
+    CHECK(output.find(
+              "diagnostic.c:2:9: error: "
+              "use of undeclared identifier 'missing'") !=
+          std::string::npos);
+    CHECK(output.find("\treturn missing;") !=
+          std::string::npos);
+    CHECK(output.find("\t       ^~~~~~~") !=
+          std::string::npos);
+}
+
+TEST_CASE("reader clones share one diagnostic engine") {
+    std::string source = "bad";
+    Reader reader("shared.c", source);
+    auto clone = reader.clone();
+    clone.report_error("first error", 0, 3);
+
+    CHECK(reader.diagnostic().has_error());
+    CHECK(reader.diagnostic().errors() == 1);
+}
+
 TEST_CASE("operator trie recognizes every C symbolic operator") {
     std::vector<std::string_view> operators = {
         "[", "]", "(", ")", "++", "--", ".", "->",

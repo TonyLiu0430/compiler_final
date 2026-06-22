@@ -1,72 +1,98 @@
 #pragma once
-#include <format>
-#include <print>
+
+#include <memory>
 #include <string>
 #include <string_view>
 
+#include "base/error.hpp"
+#include "diagnostic/diagnostic.hpp"
+
 namespace c9ay {
+
 class Reader {
-    const std::string_view file_name;
-    const std::string_view raw;
+    std::string_view file_name;
+    std::string_view raw;
+    std::shared_ptr<Diagnostic> diagnostics;
     int cnt = 0;
-    std::pair<int, int> locate(int cnt) {
-        int l = 0;
-        int c = 0;
-
-        for (int i = 0; i < cnt; i++) {
-            if (raw[i] == '\n') {
-                l++;
-                c = 0;
-            }
-            else {
-                c++;
-            }
-        }
-
-        return {l, c};
-    }
 
 public:
-    Reader(const std::string_view _file, std::string_view _raw) : file_name(_file), raw(_raw) {}
+    Reader(
+        std::string_view _file,
+        std::string_view _raw)
+        : file_name(_file),
+          raw(_raw),
+          diagnostics(std::make_shared<Diagnostic>(
+              _file,
+              _raw)) {}
+
     Reader(const Reader &other) = default;
-    Reader clone() {
+
+    Reader clone() const {
         return Reader(*this);
     }
-    std::string report_error(const std::string &error_msg, int count) {
-        auto [line, column] = locate(count);
-        auto err_msg = std::format("{}:{}:{} error : {}", file_name, line, column, error_msg);
-        std::print("{}", err_msg);
-        return err_msg;
+
+    void report_error(
+        std::string_view message,
+        int begin,
+        int end) {
+        diagnostics->error(message, {begin, end});
     }
-    std::string report_error(const std::string &error_msg) {
-        return report_error(error_msg, cnt);
+
+    void report_error(
+        std::string_view message,
+        int position) {
+        report_error(message, position, position + 1);
     }
+
+    void report_error(std::string_view message) {
+        report_error(message, cnt, cnt + 1);
+    }
+
+    Diagnostic &diagnostic() {
+        return *diagnostics;
+    }
+
+    const Diagnostic &diagnostic() const {
+        return *diagnostics;
+    }
+
     char32_t next_char() {
-        assert_c9ay(cnt < raw.size());
+        assert_c9ay(cnt < static_cast<int>(raw.size()));
         return raw[cnt++];
     }
+
     char32_t prev_char() {
         return raw[--cnt];
     }
-    bool has_next() {
-        return cnt < raw.size();
+
+    bool has_next() const {
+        return cnt < static_cast<int>(raw.size());
     }
-    char32_t peek_prev() {
+
+    char32_t peek_prev() const {
         return raw[cnt - 1];
     }
-    char32_t peek_next() {
+
+    char32_t peek_next() const {
         return raw[cnt];
     }
-    std::string_view diff(Reader &begin) {
-        int sz = (cnt)-begin.cnt;
-        return std::string_view(raw.substr(begin.cnt, sz));
+
+    std::string_view diff(const Reader &begin) const {
+        return raw.substr(begin.cnt, cnt - begin.cnt);
     }
-    int get_cnt() {
+
+    int get_cnt() const {
         return cnt;
     }
-    std::string_view get_raw() {
+
+    std::string_view get_raw() const {
         return raw;
     }
+
+    std::string_view get_file_name() const {
+        return file_name;
+    }
+
     void set_cnt(int _cnt) {
         assert_c9ay(
             0 <= _cnt &&
@@ -74,4 +100,5 @@ public:
         cnt = _cnt;
     }
 };
+
 }  // namespace c9ay

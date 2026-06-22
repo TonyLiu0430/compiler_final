@@ -6,6 +6,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "diagnostic/diagnostic.hpp"
 #include "parser/node.h"
 #include "semantic/type.hpp"
 
@@ -23,6 +24,7 @@ struct Symbol {
     std::string name;
     Type_ptr type;
     const parser::Node *declaration = nullptr;
+    Source_range range;
     bool is_defined = false;
 };
 

@@ -13,6 +13,7 @@
 
 #include "lexer/scanner.hpp"
 #include "preprocessor/constant_expression.hpp"
+#include "reader/reader.hpp"
 
 namespace c9ay::preprocessor {
 
@@ -32,6 +33,7 @@ class Preprocessor {
 
     std::unordered_map<std::string, Macro> macros;
     std::vector<std::filesystem::path> include_paths;
+    Source_range current_range;
 
     static scanner::Token next_non_trivia(
         std::string_view text,
@@ -501,6 +503,7 @@ class Preprocessor {
             if (!has_newline) end = static_cast<int>(spliced.size());
 
             std::string_view line(spliced.data() + begin, end - begin);
+            current_range = {begin, end};
             std::string_view content = trim_left(line);
             bool active = conditions.empty() || conditions.back().active;
 
@@ -589,7 +592,14 @@ class Preprocessor {
                         include.substr(1, close_at - 1),
                         local,
                         current_file);
-                    result += process_source(read_file(path), path);
+                    auto include_range = current_range;
+                    try {
+                        result += process_source(read_file(path), path);
+                    }
+                    catch (...) {
+                        current_range = include_range;
+                        throw;
+                    }
                 }
                 else if (active && directive == "error") {
                     throw std::runtime_error(std::string(trim(body)));
@@ -622,6 +632,20 @@ public:
         std::string_view source,
         const std::filesystem::path &file_name = {}) {
         return process_source(source, file_name);
+    }
+
+    std::string process(
+        Reader &reader,
+        const std::filesystem::path &file_name = {}) {
+        try {
+            return process_source(reader.get_raw(), file_name);
+        }
+        catch (const std::exception &error) {
+            reader.diagnostic().error(
+                error.what(),
+                current_range);
+            throw;
+        }
     }
 
     std::string process_file(const std::filesystem::path &path) {

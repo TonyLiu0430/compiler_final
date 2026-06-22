@@ -76,9 +76,19 @@ int main(int argc, char **argv) {
             }
         }
 
+        std::string path_text = path.string();
+        std::string raw_content = read_whole_file_text(path_text);
+        Reader source_reader(path_text, raw_content);
         preprocessor::Preprocessor preprocessor;
         preprocessor.add_include_path(C9AY_INCLUDE_DIR);
-        std::string content = preprocessor.process_file(path);
+        std::string content;
+        try {
+            content = preprocessor.process(source_reader, path);
+        }
+        catch (const std::exception &) {
+            source_reader.diagnostic().print(std::cerr);
+            return 1;
+        }
         if (preprocess_only) {
             if (output.empty()) {
                 std::print("{}", content);
@@ -89,15 +99,37 @@ int main(int argc, char **argv) {
             }
             return 0;
         }
-        std::string path_text = path.string();
         Reader reader(path_text, content);
         lexer::LexerMgr manager(reader);
         auto lexer = manager.get_lexer();
         auto program = parser::Program::match(lexer);
+        if (reader.diagnostic().has_error()) {
+            reader.diagnostic().print(std::cerr);
+            return 1;
+        }
         codegen::LLVM_codegen codegen(
             path_text,
             optimization_level);
-        codegen.generate(*program);
+        try {
+            codegen.generate(
+                *program,
+                &reader.diagnostic());
+        }
+        catch (const semantic::Compile_error &) {
+            reader.diagnostic().print(std::cerr);
+            return 1;
+        }
+        catch (const std::exception &error) {
+            reader.diagnostic().report(
+                Diagnostic_level::FATAL_LEVEL,
+                error.what(),
+                {
+                    static_cast<int>(content.size()),
+                    static_cast<int>(content.size())
+                });
+            reader.diagnostic().print(std::cerr);
+            return 1;
+        }
 
         if (emit_llvm) {
             if (output.empty()) {

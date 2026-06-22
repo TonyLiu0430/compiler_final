@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "base/literal.hpp"
+#include "diagnostic/diagnostic.hpp"
 #include "parser/parser.h"
 #include "parser/reflect_dispatch.hpp"
 #include "semantic/constant_evaluator.hpp"
@@ -42,10 +43,74 @@ class Semantic_analyzer {
     Type_ptr integer_type;
     Type_ptr current_return_type;
     Type_layout type_layout;
+    Diagnostic *diagnostics = nullptr;
+    Source_range current_range;
     int loop_depth = 0;
 
-    [[noreturn]] static void error(std::string_view message) {
+    [[noreturn]] void error(std::string_view message) {
+        if (diagnostics) {
+            diagnostics->error(message, current_range);
+        }
         throw Compile_error("compile error: " + std::string(message));
+    }
+
+    static Source_range token_range(lexer::Token token) {
+        return {token.left, token.right};
+    }
+
+    static Source_range expression_range(
+        const parser::Expression &expression) {
+        if (auto primary =
+                dynamic_cast<const parser::Primary_expression *>(
+                    &expression)) {
+            return token_range(primary->token);
+        }
+        if (auto prefix =
+                dynamic_cast<const parser::Prefix_expression *>(
+                    &expression)) {
+            return token_range(prefix->op);
+        }
+        if (auto postfix =
+                dynamic_cast<const parser::Postfix_expression *>(
+                    &expression)) {
+            return token_range(postfix->op);
+        }
+        if (auto binary =
+                dynamic_cast<const parser::Binary_expression *>(
+                    &expression)) {
+            return token_range(binary->op);
+        }
+        if (auto member =
+                dynamic_cast<const parser::Member_expression *>(
+                    &expression)) {
+            return token_range(member->member);
+        }
+        if (auto cast =
+                dynamic_cast<const parser::Cast_expression *>(
+                    &expression)) {
+            return token_range(cast->type->type);
+        }
+        if (auto query =
+                dynamic_cast<const parser::Type_query_expression *>(
+                    &expression)) {
+            return token_range(query->op);
+        }
+        if (auto call =
+                dynamic_cast<const parser::Call_expression *>(
+                    &expression)) {
+            return expression_range(*call->callee);
+        }
+        if (auto subscript =
+                dynamic_cast<const parser::Subscript_expression *>(
+                    &expression)) {
+            return expression_range(*subscript->object);
+        }
+        if (auto conditional =
+                dynamic_cast<const parser::Conditional_expression *>(
+                    &expression)) {
+            return expression_range(*conditional->condition);
+        }
+        return {};
     }
 
     void push_scope() {
@@ -92,6 +157,7 @@ class Semantic_analyzer {
         symbol->name = std::string(name);
         symbol->type = std::move(type);
         symbol->declaration = declaration;
+        symbol->range = current_range;
         auto raw = symbol.get();
         result.symbols.push_back(std::move(symbol));
         return raw;
@@ -108,6 +174,14 @@ class Semantic_analyzer {
                 symbol->kind == Symbol::Kind::FUNCTION &&
                 same_type(found->second->type, symbol->type)) {
                 return found->second;
+            }
+            if (diagnostics) {
+                diagnostics->error(
+                    "redefinition of '" + symbol->name + "'",
+                    current_range);
+                diagnostics->note(
+                    "previous declaration is here",
+                    found->second->range);
             }
             error("redefinition of '" + symbol->name + "'");
         }
@@ -285,11 +359,14 @@ class Semantic_analyzer {
         auto found = result.expressions.find(&node);
         if (found != result.expressions.end()) return found->second;
 
+        auto previous_range = current_range;
+        current_range = expression_range(node);
         auto info = parser::reflect::dispatch<Expression_info>(
             node,
             [this](const auto &expression) {
                 return analyze_expression_node(expression);
             });
+        current_range = previous_range;
         result.expressions[&node] = info;
         return info;
     }
@@ -614,8 +691,10 @@ class Semantic_analyzer {
         const parser::Declvariable &declaration,
         const parser::Init_declarator &item,
         bool global) {
+        current_range = token_range(declaration.type);
         auto base = base_type(declaration.type, declaration.is_const);
         auto type = declarator_type(base, *item.declarator);
+        current_range = token_range(item.declarator->name);
         Symbol::Kind kind = declaration.is_typedef
             ? Symbol::Kind::TYPEDEF_NAME
             : as_type<Function_type>(type)
@@ -780,6 +859,7 @@ class Semantic_analyzer {
 
     void analyze_struct_definition(
         const parser::Struct_definition &definition) {
+        current_range = token_range(definition.name);
         auto name = std::string(definition.name.raw);
         if (scopes.back().types.contains(name) ||
             scopes.back().symbols.contains(name)) {
@@ -863,10 +943,12 @@ class Semantic_analyzer {
         auto function =
             dynamic_cast<const parser::Function_definition *>(&node);
         if (!function) return;
+        current_range = token_range(function->specifiers.type);
         auto base = base_type(
             function->specifiers.type,
             function->specifiers.is_const);
         auto type = declarator_type(base, *function->declarator);
+        current_range = token_range(function->declarator->name);
         auto symbol = make_symbol(
             Symbol::Kind::FUNCTION,
             function->declarator->name.raw,
@@ -926,7 +1008,10 @@ class Semantic_analyzer {
     }
 
 public:
-    Semantic_result analyze(const parser::Program &program) {
+    Semantic_result analyze(
+        const parser::Program &program,
+        Diagnostic *_diagnostics = nullptr) {
+        diagnostics = _diagnostics;
         result = Semantic_result();
         scopes.clear();
         push_scope();
