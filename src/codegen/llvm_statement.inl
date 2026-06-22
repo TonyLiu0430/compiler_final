@@ -133,9 +133,8 @@ inline void LLVM_codegen::statement_node(
             if (auto case_statement =
                     dynamic_cast<const parser::Case_statement *>(
                         payload)) {
-                auto value =
-                    semantic::Constant_evaluator::evaluate(
-                        *case_statement->value);
+                auto value = constant_value(
+                    *case_statement->value);
                 if (!value) {
                     unsupported("non-constant switch case");
                 }

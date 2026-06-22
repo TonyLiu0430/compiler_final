@@ -290,7 +290,15 @@ cast-expression =
 unary-expression =
     postfix-expression
   | prefix-operator,
-    unary-expression ;
+    unary-expression
+  | "sizeof",
+    "(",
+    ( type-name | expression ),
+    ")"
+  | "alignof",
+    "(",
+    type-name,
+    ")" ;
 
 prefix-operator =
     "++"

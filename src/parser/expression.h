@@ -7,6 +7,7 @@
 
 #include "lexer/lexer.hpp"
 #include "parser/node.h"
+#include "parser/type_names.hpp"
 
 namespace c9ay::parser {
 
@@ -166,6 +167,26 @@ struct Cast_expression : Expression {
     }
 };
 
+struct Type_query_expression : Expression {
+    lexer::Token op;
+    std::unique_ptr<Type_name> type;
+    std::unique_ptr<Expression> operand;
+
+    Type_query_expression(
+        lexer::Token _op,
+        std::unique_ptr<Type_name> _type)
+        : op(_op), type(std::move(_type)) {
+        error_occur = type->error_occur;
+    }
+
+    Type_query_expression(
+        lexer::Token _op,
+        std::unique_ptr<Expression> _operand)
+        : op(_op), operand(std::move(_operand)) {
+        error_occur = operand->error_occur;
+    }
+};
+
 inline bool expect_operator(lexer::Lexer &lexer, char ch, std::string_view message) {
     if (!lexer.has_next() ||
         lexer.peek_next().raw.size() != 1 ||
@@ -208,6 +229,8 @@ inline bool is_postfix_operator(std::string_view op) {
 
 inline bool can_start_expression(lexer::Token token) {
     return token.match<lexer::token_type::IDENTIFIER>() ||
+           token.match<lexer::token_type::K_SIZEOF>() ||
+           token.match<lexer::token_type::K_ALIGNOF>() ||
            token.match<lexer::token_type::NUMBER>() ||
            token.match<lexer::token_type::STRING_CONSTANT>() ||
            token.match<lexer::token_type::CHAR_CONSTANT>() ||
@@ -268,7 +291,8 @@ inline std::unique_ptr<Type_name> Type_name::try_match(lexer::Lexer &lexer) {
     }
 
     if (!lexer.has_next() ||
-        !lexer.peek_next().match<lexer::token_type::IDENTIFIER>()) {
+        !lexer.peek_next().match<lexer::token_type::IDENTIFIER>() ||
+        !type_names::contains(lexer.peek_next().raw)) {
         return nullptr;
     }
 
@@ -302,7 +326,55 @@ inline std::unique_ptr<Expression> Expression::parse(lexer::Lexer &lexer, int mi
     lexer::Token token = lexer.next_token();
     std::unique_ptr<Expression> lhs;
 
-    if (token.raw.size() == 1 &&
+    if (token.match<lexer::token_type::K_SIZEOF>() ||
+        token.match<lexer::token_type::K_ALIGNOF>()) {
+        if (!expect_operator(
+                lexer,
+                '(',
+                "expect '(' after type query operator")) {
+            return nullptr;
+        }
+
+        lexer::Lexer probe = lexer;
+        auto probe_type = Type_name::try_match(probe);
+        bool has_type =
+            probe_type &&
+            probe.has_next() &&
+            probe.peek_next().raw.size() == 1 &&
+            probe.peek_next().match<lexer::token_type::OPERATOR>(')');
+
+        if (has_type) {
+            auto type = Type_name::try_match(lexer);
+            assert_c9ay(type != nullptr);
+            assert_c9ay(expect_operator(
+                lexer,
+                ')',
+                "expect ')' after type name"));
+            lhs = std::make_unique<Type_query_expression>(
+                token,
+                std::move(type));
+        }
+        else {
+            if (token.match<lexer::token_type::K_ALIGNOF>()) {
+                lexer.report_error("alignof requires a type name");
+                return nullptr;
+            }
+            auto operand = parse(lexer);
+            if (!operand) {
+                operand = recover(lexer);
+            }
+            if (!expect_operator(
+                    lexer,
+                    ')',
+                    "expect ')' after sizeof expression")) {
+                return nullptr;
+            }
+            lhs = std::make_unique<Type_query_expression>(
+                token,
+                std::move(operand));
+        }
+    }
+    else if (token.raw.size() == 1 &&
         token.match<lexer::token_type::OPERATOR>('(')) {
         lexer::Lexer probe = lexer;
         auto probe_type = Type_name::try_match(probe);

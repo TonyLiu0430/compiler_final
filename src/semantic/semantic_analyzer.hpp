@@ -13,6 +13,7 @@
 #include "parser/reflect_dispatch.hpp"
 #include "semantic/constant_evaluator.hpp"
 #include "semantic/symbol.hpp"
+#include "semantic/type_layout.hpp"
 
 namespace c9ay::semantic {
 
@@ -40,6 +41,7 @@ class Semantic_analyzer {
     Type_ptr character_type;
     Type_ptr integer_type;
     Type_ptr current_return_type;
+    Type_layout type_layout;
     int loop_depth = 0;
 
     [[noreturn]] static void error(std::string_view message) {
@@ -113,14 +115,76 @@ class Semantic_analyzer {
         return symbol;
     }
 
+    std::optional<constant::Integer_value> evaluate_constant(
+        const parser::Expression &expression) {
+        Constant_evaluator evaluator(
+            [this](const parser::Type_query_expression &query) {
+                auto value = type_query_value(query);
+                if (!value) {
+                    return std::optional<constant::Integer_value>();
+                }
+                return std::optional<constant::Integer_value>(
+                    constant::Integer_value{*value});
+            });
+        return evaluator.evaluate_expression(expression);
+    }
+
     std::optional<long long> array_size(
         const parser::Expression *expression) {
         if (!expression) return std::nullopt;
-        auto value = Constant_evaluator::evaluate(*expression);
+        auto value = evaluate_constant(*expression);
         if (!value || value->value <= 0) {
             error("array size must be a positive integer constant");
         }
         return value->value;
+    }
+
+    Type_ptr type_name(const parser::Type_name &node) {
+        Type_ptr type = base_type(node.type, node.is_const);
+        if (!node.declarator) return type;
+
+        for (int i = 0;
+             i < node.declarator->pointer_depth;
+             i++) {
+            type = make_pointer(type);
+        }
+        for (int i =
+                 static_cast<int>(
+                     node.declarator->array_dimensions.size()) - 1;
+             i >= 0;
+             i--) {
+            type = make_array(
+                type,
+                array_size(
+                    node.declarator->array_dimensions[i].get()));
+        }
+        return type;
+    }
+
+    std::optional<long long> type_query_value(
+        const parser::Type_query_expression &node) {
+        auto cached = result.constant(node);
+        if (cached) return cached;
+
+        Type_ptr type;
+        if (node.type) {
+            type = type_name(*node.type);
+        }
+        else {
+            type = analyze_expression(*node.operand).type;
+        }
+
+        std::optional<long long> value =
+            node.op.match<lexer::token_type::K_ALIGNOF>()
+                ? type_layout.alignment_of(type)
+                : type_layout.size_of(type);
+        if (!value) {
+            error(
+                std::string(node.op.raw) +
+                " requires a complete object type");
+        }
+        result.constants[&node] = *value;
+        return value;
     }
 
     Type_ptr declarator_type(
@@ -204,9 +268,9 @@ class Semantic_analyzer {
         return false;
     }
 
-    static bool is_null_pointer_constant(
+    bool is_null_pointer_constant(
         const parser::Expression &expression) {
-        auto value = Constant_evaluator::evaluate(expression);
+        auto value = evaluate_constant(expression);
         return value && value->value == 0;
     }
 
@@ -527,17 +591,13 @@ class Semantic_analyzer {
     Expression_info analyze_expression_node(
         const parser::Cast_expression &node) {
         analyze_expression(*node.operand);
-        Type_ptr type = base_type(
-            node.type->type,
-            node.type->is_const);
-        if (node.type->declarator) {
-            for (int i = 0;
-                 i < node.type->declarator->pointer_depth;
-                 i++) {
-                type = make_pointer(type);
-            }
-        }
-        return Expression_info{type};
+        return Expression_info{type_name(*node.type)};
+    }
+
+    Expression_info analyze_expression_node(
+        const parser::Type_query_expression &node) {
+        type_query_value(node);
+        return Expression_info{integer_type};
     }
 
     Expression_info analyze_expression_node(

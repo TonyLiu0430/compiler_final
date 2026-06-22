@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <optional>
 #include <string_view>
 
@@ -11,6 +12,10 @@ namespace c9ay::semantic {
 
 class Constant_evaluator {
     using Result = std::optional<constant::Integer_value>;
+    using Type_query_resolver =
+        std::function<Result(const parser::Type_query_expression &)>;
+
+    Type_query_resolver type_query_resolver;
 
     static Result parse_number(std::string_view raw) {
         long long value = 0;
@@ -28,6 +33,18 @@ class Constant_evaluator {
     }
 
 public:
+    Constant_evaluator(
+        Type_query_resolver _type_query_resolver = {})
+        : type_query_resolver(std::move(_type_query_resolver)) {}
+
+    Result evaluate_expression(
+        const parser::Expression &expression) {
+        if (expression.error_occur) return std::nullopt;
+        return parser::reflect::dispatch<Result>(
+            expression,
+            *this);
+    }
+
     Result operator()(const parser::Primary_expression &expression) {
         if (expression.token.type == lexer::token_type::NUMBER) {
             return parse_number(expression.token.raw);
@@ -39,13 +56,13 @@ public:
     }
 
     Result operator()(const parser::Prefix_expression &expression) {
-        auto operand = evaluate(*expression.operand);
+        auto operand = evaluate_expression(*expression.operand);
         if (!operand) return std::nullopt;
         return constant::evaluate_prefix(expression.op.raw, *operand);
     }
 
     Result operator()(const parser::Binary_expression &expression) {
-        auto lhs = evaluate(*expression.lhs);
+        auto lhs = evaluate_expression(*expression.lhs);
         if (!lhs) return std::nullopt;
 
         if (expression.op.raw == "&&" && lhs->value == 0) {
@@ -55,7 +72,7 @@ public:
             return constant::Integer_value{1};
         }
 
-        auto rhs = evaluate(*expression.rhs);
+        auto rhs = evaluate_expression(*expression.rhs);
         if (!rhs) return std::nullopt;
         return constant::evaluate_binary(
             expression.op.raw,
@@ -64,15 +81,21 @@ public:
     }
 
     Result operator()(const parser::Conditional_expression &expression) {
-        auto condition = evaluate(*expression.condition);
+        auto condition = evaluate_expression(*expression.condition);
         if (!condition) return std::nullopt;
         return condition->value
-            ? evaluate(*expression.true_expression)
-            : evaluate(*expression.false_expression);
+            ? evaluate_expression(*expression.true_expression)
+            : evaluate_expression(*expression.false_expression);
     }
 
     Result operator()(const parser::Cast_expression &expression) {
-        return evaluate(*expression.operand);
+        return evaluate_expression(*expression.operand);
+    }
+
+    Result operator()(
+        const parser::Type_query_expression &expression) {
+        if (!type_query_resolver) return std::nullopt;
+        return type_query_resolver(expression);
     }
 
     Result operator()(const parser::Expression &) {
@@ -82,9 +105,7 @@ public:
     static Result evaluate(const parser::Expression &expression) {
         if (expression.error_occur) return std::nullopt;
         Constant_evaluator evaluator;
-        return parser::reflect::dispatch<Result>(
-            expression,
-            evaluator);
+        return evaluator.evaluate_expression(expression);
     }
 };
 

@@ -492,6 +492,13 @@ inline llvm::Value *LLVM_codegen::expression_node(
 }
 
 inline llvm::Value *LLVM_codegen::expression_node(
+    const parser::Type_query_expression &node) {
+    auto value = semantic_result.constant(node);
+    if (!value) unsupported("type query constant");
+    return integer(*value);
+}
+
+inline llvm::Value *LLVM_codegen::expression_node(
     const parser::Error_expression &) {
     unsupported("erroneous expression");
 }

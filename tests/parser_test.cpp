@@ -62,8 +62,9 @@ TEST_CASE("structural punctuators stay punctuators") {
     }
 }
 
-TEST_CASE("sizeof and alignof stay identifier calls") {
-    std::string source = "sizeof(x) + alignof(y)";
+TEST_CASE("sizeof and alignof parse as type query operators") {
+    std::string source =
+        "sizeof(int) + sizeof(value) + alignof(int)";
     Reader reader("expression.c", source);
     lexer::LexerMgr mgr(reader);
     auto lexer = mgr.get_lexer();
@@ -73,8 +74,22 @@ TEST_CASE("sizeof and alignof stay identifier calls") {
     auto binary = dynamic_cast<parser::Binary_expression *>(expression.get());
     REQUIRE(binary != nullptr);
     CHECK(binary->op.raw == "+");
-    CHECK(dynamic_cast<parser::Call_expression *>(binary->lhs.get()) != nullptr);
-    CHECK(dynamic_cast<parser::Call_expression *>(binary->rhs.get()) != nullptr);
+    CHECK(dynamic_cast<parser::Type_query_expression *>(
+              binary->rhs.get()) != nullptr);
+    auto left = dynamic_cast<parser::Binary_expression *>(
+        binary->lhs.get());
+    REQUIRE(left != nullptr);
+    auto type_size = dynamic_cast<parser::Type_query_expression *>(
+        left->lhs.get());
+    auto expression_size =
+        dynamic_cast<parser::Type_query_expression *>(
+            left->rhs.get());
+    REQUIRE(type_size != nullptr);
+    REQUIRE(expression_size != nullptr);
+    CHECK(type_size->type != nullptr);
+    CHECK(type_size->operand == nullptr);
+    CHECK(expression_size->type == nullptr);
+    CHECK(expression_size->operand != nullptr);
 }
 
 TEST_CASE("Pratt parser respects C precedence") {
@@ -792,6 +807,50 @@ TEST_CASE("preprocessor constant expression uses shared integer operations") {
         preprocessor::Constant_expression("1 / 0")
             .evaluate()
             .has_value());
+}
+
+TEST_CASE("sizeof and alignof are semantic integer constants") {
+    std::string source = R"(
+        struct Pair {
+            char tag;
+            int value;
+        };
+
+        int integers[sizeof(int) * 2];
+        char record_alignment[alignof(Pair)];
+        char record_size[sizeof(Pair)];
+
+        int main() {
+            int value = 1;
+            return sizeof(value++) +
+                   sizeof(int *) +
+                   sizeof(int[3]) +
+                   alignof(Pair) +
+                   sizeof(Pair) +
+                   value;
+        }
+    )";
+
+    Reader reader("type-query.c", source);
+    lexer::LexerMgr mgr(reader);
+    auto lexer = mgr.get_lexer();
+    auto program = parser::Program::match(lexer);
+
+    REQUIRE(program != nullptr);
+    REQUIRE_FALSE(program->error_occur);
+
+    semantic::Semantic_analyzer analyzer;
+    CHECK_NOTHROW(analyzer.analyze(*program));
+
+    codegen::LLVM_codegen codegen("type_query");
+    CHECK_NOTHROW(codegen.generate(*program));
+    auto ir = codegen.ir();
+    CHECK(ir.find("@integers = global [8 x i32]") !=
+          std::string::npos);
+    CHECK(ir.find("@record_alignment = global [4 x i8]") !=
+          std::string::npos);
+    CHECK(ir.find("@record_size = global [8 x i8]") !=
+          std::string::npos);
 }
 
 TEST_CASE("LLVM codegen emits verified IR for basic C") {

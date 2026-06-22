@@ -37,6 +37,8 @@ enum class token_type {
     K_BREAK,
     K_CONTINUE,
     K_STRUCT,
+    K_SIZEOF,
+    K_ALIGNOF,
     K_TYPEDEF,
     K_CONST,
     K_STATIC
@@ -47,19 +49,19 @@ struct Token {
     token_type type;
     int right;
     template <token_type t>
-    bool match(char c) {
+    bool match(char c) const {
         if (type != t) return false;
         assert_c9ay(raw.size() == 1);
         return raw[0] == c;
     }
     template <token_type t>
-    bool match(std::string_view s) {
+    bool match(std::string_view s) const {
         if (type != t) return false;
         assert_c9ay(raw.size() != 1);
         return raw == s;
     }
     template <token_type t>
-    bool match() {
+    bool match() const {
         return type == t;
     }
 };

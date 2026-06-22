@@ -78,7 +78,7 @@ inline void Semantic_analyzer::analyze_statement_node(
     const parser::Case_statement &node) {
     if (switches.empty()) error("case outside switch");
 
-    auto value = Constant_evaluator::evaluate(*node.value);
+    auto value = evaluate_constant(*node.value);
     if (!value) {
         error("case value is not an integer constant");
     }

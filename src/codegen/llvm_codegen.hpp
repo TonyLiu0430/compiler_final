@@ -261,6 +261,15 @@ class LLVM_codegen {
         return builder.CreateICmpNE(value, integer(0), "condition");
     }
 
+    std::optional<constant::Integer_value> constant_value(
+        const parser::Expression &expression) {
+        auto value = semantic_result.constant(expression);
+        if (value) {
+            return constant::Integer_value{*value};
+        }
+        return semantic::Constant_evaluator::evaluate(expression);
+    }
+
     static bool is_terminated(llvm::BasicBlock *block) {
         return !block->empty() && block->back().isTerminator();
     }
@@ -417,6 +426,8 @@ class LLVM_codegen {
     llvm::Value *expression_node(const parser::Member_expression &node);
     llvm::Value *expression_node(const parser::Conditional_expression &node);
     llvm::Value *expression_node(const parser::Cast_expression &node);
+    llvm::Value *expression_node(
+        const parser::Type_query_expression &node);
     llvm::Value *expression_node(const parser::Error_expression &node);
     llvm::Value *expression_node(const parser::Expression &node);
 
@@ -580,7 +591,7 @@ class LLVM_codegen {
                 }
             }
 
-            auto value = semantic::Constant_evaluator::evaluate(
+            auto value = constant_value(
                 *expression_initializer->expression);
             if (!value) {
                 unsupported("non-constant global initializer");

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -37,6 +38,7 @@ struct Semantic_result {
     Type_ptr integer_type;
     std::vector<std::unique_ptr<Symbol>> symbols;
     std::unordered_map<const parser::Expression *, Expression_info> expressions;
+    std::unordered_map<const parser::Expression *, long long> constants;
     std::unordered_map<const parser::Declarator *, const Symbol *> declarators;
 
     const Expression_info &info(const parser::Expression &expression) const {
@@ -46,6 +48,13 @@ struct Semantic_result {
     const Symbol *symbol(const parser::Declarator &declarator) const {
         auto found = declarators.find(&declarator);
         return found == declarators.end() ? nullptr : found->second;
+    }
+
+    std::optional<long long> constant(
+        const parser::Expression &expression) const {
+        auto found = constants.find(&expression);
+        if (found == constants.end()) return std::nullopt;
+        return found->second;
     }
 };
 
