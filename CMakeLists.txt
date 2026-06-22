@@ -9,7 +9,11 @@ option(ENABLE_EXPERIMENTAL_REFLECTION "Enable experimental C++26 reflection supp
 option(ENABLE_LLVM_CODEGEN "Build the LLVM code generator" ON)
 option(C9AY_BUILD_LLVM "Build LLVM inside this project (one-time bootstrap)" OFF)
 
-file(GLOB_RECURSE HEADERS CONFIGURE_DEPENDS "src/*.h" "src/*.hpp")
+file(GLOB_RECURSE HEADERS CONFIGURE_DEPENDS
+    "src/*.h"
+    "src/*.hpp"
+    "src/*.inl"
+)
 file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS "src/*.cpp")
 include_directories(src)
 include_directories(include)
@@ -133,6 +137,7 @@ endif()
 
 if(MINGW AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     target_link_libraries(compiler PRIVATE stdc++exp)
+    target_link_options(compiler PRIVATE -s)
 endif()
 
 include(CTest)
@@ -149,6 +154,7 @@ if(BUILD_TESTING)
 
     if(MINGW AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
         target_link_libraries(compiler_tests PRIVATE stdc++exp)
+        target_link_options(compiler_tests PRIVATE -s)
     endif()
 
     add_test(NAME compiler_tests COMMAND compiler_tests)

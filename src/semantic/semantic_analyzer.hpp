@@ -383,11 +383,6 @@ class Semantic_analyzer {
             }
             info.type = rhs.type;
         }
-        else if (op == "+" &&
-                 lhs.type->is_integer() &&
-                 rhs.type->kind == Type::Kind::POINTER_TYPE) {
-            info.type = rhs.type;
-        }
         else if (op == "-" &&
                  lhs.type->kind == Type::Kind::POINTER_TYPE &&
                  rhs.type->kind == Type::Kind::POINTER_TYPE) {
@@ -447,7 +442,12 @@ class Semantic_analyzer {
         }
         for (int i = 0; i < static_cast<int>(node.arguments.size()); i++) {
             auto argument = analyze_expression(*node.arguments[i]);
-            if (!assignable(function_type->parameters[i], argument.type)) {
+            if (!assignable(
+                    function_type->parameters[i],
+                    argument.type) &&
+                !(function_type->parameters[i]->kind ==
+                      Type::Kind::POINTER_TYPE &&
+                  is_null_pointer_constant(*node.arguments[i]))) {
                 error("incompatible function argument");
             }
         }
@@ -481,6 +481,14 @@ class Semantic_analyzer {
         auto false_info = analyze_expression(*node.false_expression);
         if (!condition.type->is_scalar()) {
             error("conditional expression requires scalar condition");
+        }
+        if (true_info.type->kind == Type::Kind::POINTER_TYPE &&
+            is_null_pointer_constant(*node.false_expression)) {
+            return Expression_info{true_info.type};
+        }
+        if (false_info.type->kind == Type::Kind::POINTER_TYPE &&
+            is_null_pointer_constant(*node.true_expression)) {
+            return Expression_info{false_info.type};
         }
         if (!assignable(true_info.type, false_info.type) &&
             !assignable(false_info.type, true_info.type)) {

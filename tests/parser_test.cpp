@@ -1,6 +1,7 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include "doctest.h"
 
+#include <filesystem>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -1270,4 +1271,141 @@ TEST_CASE("preprocessor treats unknown condition identifiers as zero") {
 
     CHECK(result.find("int selected;") != std::string::npos);
     CHECK(result.find("int wrong;") == std::string::npos);
+}
+
+TEST_CASE("LLVM codegen handles static functions and void expressions") {
+    std::string source = R"(
+        static int hidden() {
+            return 1;
+        }
+
+        void left() {
+            return;
+        }
+
+        void right() {
+            return;
+        }
+
+        int main() {
+            (void)hidden();
+            1 ? (void)left() : (void)right();
+            return 0;
+        }
+    )";
+
+    Reader reader("void-expression.c", source);
+    lexer::LexerMgr mgr(reader);
+    auto lexer = mgr.get_lexer();
+    auto program = parser::Program::match(lexer);
+
+    codegen::LLVM_codegen codegen("void_expression");
+    CHECK_NOTHROW(codegen.generate(*program));
+    std::string ir = codegen.ir();
+
+    CHECK(ir.find("define internal i32 @hidden") !=
+          std::string::npos);
+    CHECK(ir.find("conditional.true") != std::string::npos);
+    CHECK(ir.find("phi void") == std::string::npos);
+}
+
+TEST_CASE("LLVM backend emits object and executable files") {
+    std::string source = "int main() { return 0; }";
+    Reader reader("emit.c", source);
+    lexer::LexerMgr mgr(reader);
+    auto lexer = mgr.get_lexer();
+    auto program = parser::Program::match(lexer);
+
+    auto directory = std::filesystem::temp_directory_path();
+    auto object = directory / "c9ay-compiler-test.o";
+    auto executable = directory / "c9ay-compiler-test.exe";
+    std::filesystem::remove(object);
+    std::filesystem::remove(executable);
+
+    codegen::LLVM_codegen codegen("emit");
+    codegen.generate(*program);
+
+    CHECK_NOTHROW(codegen.emit_object(object));
+    CHECK(std::filesystem::exists(object));
+    CHECK(std::filesystem::file_size(object) != 0);
+
+    CHECK_NOTHROW(codegen.emit_executable(executable));
+    CHECK(std::filesystem::exists(executable));
+    CHECK(std::filesystem::file_size(executable) != 0);
+
+    std::filesystem::remove(object);
+    std::filesystem::remove(executable);
+}
+
+TEST_CASE("LLVM codegen handles multidimensional arrays and scalar braces") {
+    std::string source = R"(
+        int matrix[2][3] = {
+            {1, 2, 3},
+            {4, 5, 6}
+        };
+
+        int main() {
+            int value = {matrix[1][2]};
+            int empty = {};
+            return value + empty;
+        }
+    )";
+
+    Reader reader("multidimensional.c", source);
+    lexer::LexerMgr mgr(reader);
+    auto lexer = mgr.get_lexer();
+    auto program = parser::Program::match(lexer);
+
+    codegen::LLVM_codegen codegen("multidimensional");
+    CHECK_NOTHROW(codegen.generate(*program));
+    std::string ir = codegen.ir();
+
+    CHECK(ir.find("@matrix = global [2 x [3 x i32]]") !=
+          std::string::npos);
+    CHECK(ir.find("getelementptr") != std::string::npos);
+}
+
+TEST_CASE("null pointer constants work in calls and conditional expressions") {
+    std::string source = R"(
+        int read_or_zero(int *value) {
+            return value ? *value : 0;
+        }
+
+        int main() {
+            int value = 42;
+            int *selected = 1 ? &value : 0;
+            return read_or_zero(0) + *selected;
+        }
+    )";
+
+    Reader reader("null-pointer.c", source);
+    lexer::LexerMgr mgr(reader);
+    auto lexer = mgr.get_lexer();
+    auto program = parser::Program::match(lexer);
+
+    codegen::LLVM_codegen codegen("null_pointer");
+    CHECK_NOTHROW(codegen.generate(*program));
+    CHECK(codegen.ir().find("ptr null") != std::string::npos);
+}
+
+TEST_CASE("compatible repeated function prototypes share one symbol") {
+    std::string source = R"(
+        int value(int input);
+        int value(int input);
+
+        int value(int input) {
+            return input;
+        }
+    )";
+
+    Reader reader("repeated-prototype.c", source);
+    lexer::LexerMgr mgr(reader);
+    auto lexer = mgr.get_lexer();
+    auto program = parser::Program::match(lexer);
+
+    semantic::Semantic_analyzer analyzer;
+    CHECK_NOTHROW(analyzer.analyze(*program));
+
+    codegen::LLVM_codegen codegen("repeated_prototype");
+    CHECK_NOTHROW(codegen.generate(*program));
 }
