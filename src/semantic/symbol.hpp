@@ -32,6 +32,9 @@ struct Expression_info {
 };
 
 struct Semantic_result {
+    Type_ptr void_type;
+    Type_ptr character_type;
+    Type_ptr integer_type;
     std::vector<std::unique_ptr<Symbol>> symbols;
     std::unordered_map<const parser::Expression *, Expression_info> expressions;
     std::unordered_map<const parser::Declarator *, const Symbol *> declarators;

@@ -24,6 +24,9 @@ inline void LLVM_codegen::statement_node(
 }
 
 inline void LLVM_codegen::statement_node(
+    const parser::Struct_definition &) {}
+
+inline void LLVM_codegen::statement_node(
     const parser::Expression_statement &node) {
     if (node.expression) {
         expression(*node.expression);
@@ -95,7 +98,7 @@ inline void LLVM_codegen::statement_node(
         "switch.end",
         current_function);
     auto default_block = end_block;
-    auto condition = as_i32(expression(*node.condition));
+    auto condition = as_integer(expression(*node.condition));
     auto switch_instruction = builder.CreateSwitch(
         condition,
         end_block);

@@ -173,6 +173,7 @@ struct Declaration_specifiers {
 };
 
 struct Parameter_declaration;
+struct Declvariable;
 
 struct Declarator : Node {
     lexer::Token name;
@@ -233,6 +234,17 @@ struct Init_declarator : Node {
         initializer = std::move(_initializer);
         error_occur |= initializer->error_occur;
     }
+};
+
+struct Struct_definition : Statement {
+    static constexpr lexer::token_type start =
+        lexer::token_type::K_STRUCT;
+
+    lexer::Token name;
+    std::vector<std::unique_ptr<Declvariable>> fields;
+
+    static std::unique_ptr<Struct_definition> match(
+        lexer::Lexer &lexer);
 };
 
 struct Declvariable : Statement {
@@ -904,6 +916,54 @@ inline std::unique_ptr<Declvariable> Declvariable::match(lexer::Lexer &lexer) {
     return cur;
 }
 
+inline std::unique_ptr<Struct_definition> Struct_definition::match(
+    lexer::Lexer &lexer) {
+    auto cur = std::make_unique<Struct_definition>();
+    assert_c9ay(
+        lexer.next_token().match<lexer::token_type::K_STRUCT>());
+
+    if (!lexer.has_next() ||
+        !lexer.peek_next().match<lexer::token_type::IDENTIFIER>()) {
+        lexer.report_error("struct definition expect a name");
+        return nullptr;
+    }
+    cur->name = lexer.next_token();
+
+    if (!expect_punctuarter(
+            lexer,
+            '{',
+            "expect '{' after struct name")) {
+        return nullptr;
+    }
+
+    type_names::add(cur->name.raw);
+    while (lexer.has_next() &&
+           !lexer.peek_next().match<
+               lexer::token_type::PUNCTUATOR>('}')) {
+        auto field = Declvariable::match(lexer);
+        if (!field) {
+            lexer.report_error("expect struct field declaration");
+            lexer.panic_recovery<Statement>();
+            cur->error_occur = true;
+            continue;
+        }
+        cur->error_occur |= field->error_occur;
+        cur->fields.push_back(std::move(field));
+    }
+
+    if (!expect_punctuarter(
+            lexer,
+            '}',
+            "expect '}' after struct fields") ||
+        !expect_punctuarter(
+            lexer,
+            ';',
+            "expect ';' after struct definition")) {
+        return nullptr;
+    }
+    return cur;
+}
+
 inline std::unique_ptr<Block> Block::match(lexer::Lexer &lexer) {
     type_names::Scope type_scope;
     auto cur = std::make_unique<Block>();
@@ -965,6 +1025,19 @@ inline std::unique_ptr<Program> Program::match(lexer::Lexer &lexer) {
     type_names::reset();
     auto cur = std::make_unique<Program>();
     while (lexer.has_next()) {
+        if (lexer.peek_next().match<lexer::token_type::K_STRUCT>()) {
+            auto definition = Struct_definition::match(lexer);
+            if (definition) {
+                cur->error_occur |= definition->error_occur;
+                cur->external_declarations.push_back(
+                    std::move(definition));
+            }
+            else {
+                cur->error_occur = true;
+            }
+            continue;
+        }
+
         if (auto function = Function_definition::try_match(lexer)) {
             cur->error_occur |= function->error_occur;
             cur->external_declarations.push_back(std::move(function));

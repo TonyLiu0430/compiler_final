@@ -22,6 +22,11 @@ inline void Semantic_analyzer::analyze_statement_node(
 }
 
 inline void Semantic_analyzer::analyze_statement_node(
+    const parser::Struct_definition &node) {
+    analyze_struct_definition(node);
+}
+
+inline void Semantic_analyzer::analyze_statement_node(
     const parser::Expression_statement &node) {
     if (node.expression) {
         analyze_expression(*node.expression);
@@ -30,7 +35,7 @@ inline void Semantic_analyzer::analyze_statement_node(
 
 inline void Semantic_analyzer::analyze_statement_node(
     const parser::Return_statement &node) {
-    if (current_return_type->kind == Type::Kind::VOID_TYPE) {
+    if (is_void(current_return_type)) {
         if (node.expression) {
             error("void function should not return a value");
         }
@@ -42,7 +47,7 @@ inline void Semantic_analyzer::analyze_statement_node(
     }
     auto value = analyze_expression(*node.expression);
     if (!assignable(current_return_type, value.type) &&
-        !(current_return_type->kind == Type::Kind::POINTER_TYPE &&
+        !(as_type<Pointer_type>(current_return_type) &&
           is_null_pointer_constant(*node.expression))) {
         error("return type mismatch");
     }

@@ -3,7 +3,16 @@ program =
 
 external-declaration =
     function-definition
-  | declaration ;
+  | declaration
+  | struct-definition ;
+
+struct-definition =
+    "struct",
+    IDENTIFIER,
+    "{",
+    { declaration },
+    "}",
+    ";" ;
 
 function-definition =
     declaration-specifiers,
@@ -73,6 +82,7 @@ initializer-list =
 
 statement =
     block
+  | struct-definition
   | if-statement
   | switch-statement
   | labeled-statement

@@ -36,6 +36,9 @@ class Semantic_analyzer {
     Semantic_result result;
     std::vector<Scope> scopes;
     std::vector<Switch_context> switches;
+    Type_ptr void_type;
+    Type_ptr character_type;
+    Type_ptr integer_type;
     Type_ptr current_return_type;
     int loop_depth = 0;
 
@@ -70,21 +73,11 @@ class Semantic_analyzer {
     Type_ptr base_type(
         lexer::Token token,
         bool is_const = false) {
-        Type_ptr type;
-        if (token.raw == "void") type = Type::make_void();
-        else if (token.raw == "char") type = Type::make_char();
-        else if (token.raw == "int") type = Type::make_int();
-        else type = find_type(token.raw);
-
+        Type_ptr type = find_type(token.raw);
         if (!type) {
             error("unknown type '" + std::string(token.raw) + "'");
         }
-
-        if (is_const) {
-            type = std::make_shared<Type>(*type);
-            type->is_const = true;
-        }
-        return type;
+        return qualify(type, is_const);
     }
 
     Symbol *make_symbol(
@@ -135,13 +128,13 @@ class Semantic_analyzer {
         const parser::Declarator &declarator) {
         Type_ptr type = std::move(base);
         for (int i = 0; i < declarator.pointer_depth; i++) {
-            type = Type::make_pointer(type);
+            type = make_pointer(type);
         }
         for (int i =
                  static_cast<int>(declarator.array_dimensions.size()) - 1;
              i >= 0;
              i--) {
-            type = Type::make_array(
+            type = make_array(
                 type,
                 array_size(declarator.array_dimensions[i].get()));
         }
@@ -150,8 +143,10 @@ class Semantic_analyzer {
             std::vector<Type_ptr> parameters;
             bool void_parameter_list =
                 declarator.parameters.size() == 1 &&
-                declarator.parameters[0]->specifiers.type.raw == "void" &&
-                !declarator.parameters[0]->declarator;
+                !declarator.parameters[0]->declarator &&
+                is_void(base_type(
+                    declarator.parameters[0]->specifiers.type,
+                    declarator.parameters[0]->specifiers.is_const));
 
             if (!void_parameter_list) {
                 for (auto &parameter : declarator.parameters) {
@@ -164,17 +159,17 @@ class Semantic_analyzer {
                             parameter_base,
                             *parameter->declarator);
                     }
-                    if (parameter_type->kind == Type::Kind::ARRAY_TYPE ||
-                        parameter_type->kind == Type::Kind::FUNCTION_TYPE) {
+                    if (as_type<Array_type>(parameter_type) ||
+                        as_type<Function_type>(parameter_type)) {
                         parameter_type = parameter_type->decay();
                     }
-                    if (parameter_type->kind == Type::Kind::VOID_TYPE) {
+                    if (is_void(parameter_type)) {
                         error("parameter has incomplete type void");
                     }
                     parameters.push_back(parameter_type);
                 }
             }
-            type = Type::make_function(type, std::move(parameters));
+            type = make_function(type, std::move(parameters));
         }
         if (declarator.nested) {
             type = declarator_type(type, *declarator.nested);
@@ -183,26 +178,25 @@ class Semantic_analyzer {
     }
 
     static bool assignable(Type_ptr lhs, Type_ptr rhs) {
-        if (rhs->kind == Type::Kind::ARRAY_TYPE ||
-            rhs->kind == Type::Kind::FUNCTION_TYPE) {
+        if (as_type<Array_type>(rhs) ||
+            as_type<Function_type>(rhs)) {
             rhs = rhs->decay();
         }
         if (same_type(lhs, rhs)) return true;
         if (lhs->is_integer() && rhs->is_integer()) return true;
-        if (lhs->kind == Type::Kind::POINTER_TYPE &&
-            rhs->kind == Type::Kind::POINTER_TYPE) {
-            if (!lhs->element->is_const &&
-                rhs->element->is_const) {
+        auto lhs_pointer = as_type<Pointer_type>(lhs);
+        auto rhs_pointer = as_type<Pointer_type>(rhs);
+        if (lhs_pointer && rhs_pointer) {
+            if (!lhs_pointer->element->is_const &&
+                rhs_pointer->element->is_const) {
                 return false;
             }
-            if (lhs->element->kind == Type::Kind::VOID_TYPE ||
-                rhs->element->kind == Type::Kind::VOID_TYPE) {
+            if (is_void(lhs_pointer->element) ||
+                is_void(rhs_pointer->element)) {
                 return true;
             }
-            auto lhs_element =
-                std::make_shared<Type>(*lhs->element);
-            auto rhs_element =
-                std::make_shared<Type>(*rhs->element);
+            auto lhs_element = lhs_pointer->element->clone();
+            auto rhs_element = rhs_pointer->element->clone();
             lhs_element->is_const = false;
             rhs_element->is_const = false;
             return same_type(lhs_element, rhs_element);
@@ -217,9 +211,10 @@ class Semantic_analyzer {
     }
 
     static bool is_object_pointer(const Type_ptr &type) {
-        return type->kind == Type::Kind::POINTER_TYPE &&
-               type->element &&
-               type->element->is_complete();
+        auto pointer = as_type<Pointer_type>(type);
+        return pointer &&
+               pointer->element &&
+               pointer->element->is_complete();
     }
 
     Expression_info analyze_expression(const parser::Expression &node) {
@@ -240,13 +235,13 @@ class Semantic_analyzer {
         Expression_info info;
         if (node.token.type == lexer::token_type::NUMBER ||
             node.token.type == lexer::token_type::CHAR_CONSTANT) {
-            info.type = Type::make_int();
+            info.type = integer_type;
         }
         else if (node.token.type == lexer::token_type::STRING_CONSTANT) {
             auto value = literal::decode_string(node.token.raw);
             if (!value) error("invalid string literal");
-            info.type = Type::make_array(
-                Type::make_char(),
+            info.type = make_array(
+                character_type,
                 static_cast<long long>(value->size() + 1));
             info.is_lvalue = true;
         }
@@ -272,21 +267,22 @@ class Semantic_analyzer {
         Expression_info info;
         if (node.op.raw == "&") {
             if (!operand.is_lvalue &&
-                operand.type->kind != Type::Kind::FUNCTION_TYPE) {
+                !as_type<Function_type>(operand.type)) {
                 error("address-of operand is not an lvalue");
             }
-            info.type = Type::make_pointer(operand.type);
+            info.type = make_pointer(operand.type);
         }
         else if (node.op.raw == "*") {
-            auto type = operand.type->kind == Type::Kind::ARRAY_TYPE
+            auto type = as_type<Array_type>(operand.type)
                 ? operand.type->decay()
                 : operand.type;
-            if (type->kind != Type::Kind::POINTER_TYPE) {
+            auto pointer = as_type<Pointer_type>(type);
+            if (!pointer) {
                 error("dereference operand is not a pointer");
             }
-            info.type = type->element;
+            info.type = pointer->element;
             info.is_lvalue =
-                info.type->kind != Type::Kind::FUNCTION_TYPE;
+                !as_type<Function_type>(info.type);
         }
         else if (node.op.raw == "++" || node.op.raw == "--") {
             if (!operand.is_lvalue ||
@@ -294,7 +290,7 @@ class Semantic_analyzer {
                 !operand.type->is_scalar()) {
                 error("increment operand is not a modifiable scalar lvalue");
             }
-            if (operand.type->kind == Type::Kind::POINTER_TYPE &&
+            if (as_type<Pointer_type>(operand.type) &&
                 !is_object_pointer(operand.type)) {
                 error("pointer arithmetic requires complete object type");
             }
@@ -304,7 +300,7 @@ class Semantic_analyzer {
             if (!operand.type->is_integer()) {
                 error("unary operator requires integer operand");
             }
-            info.type = Type::make_int();
+            info.type = integer_type;
         }
         return info;
     }
@@ -316,7 +312,7 @@ class Semantic_analyzer {
             !operand.type->is_scalar()) {
             error("postfix operand is not a modifiable scalar lvalue");
         }
-        if (operand.type->kind == Type::Kind::POINTER_TYPE &&
+        if (as_type<Pointer_type>(operand.type) &&
             !is_object_pointer(operand.type)) {
             error("pointer arithmetic requires complete object type");
         }
@@ -335,7 +331,7 @@ class Semantic_analyzer {
                 error("assignment target is not a modifiable lvalue");
             }
             if (!assignable(lhs.type, rhs.type) &&
-                !(lhs.type->kind == Type::Kind::POINTER_TYPE &&
+                !(as_type<Pointer_type>(lhs.type) &&
                   is_null_pointer_constant(*node.rhs))) {
                 error(
                     "cannot assign '" + rhs.type->name() +
@@ -350,7 +346,7 @@ class Semantic_analyzer {
                 error("assignment target is not a modifiable lvalue");
             }
             std::string_view base = op.substr(0, op.size() - 1);
-            if (lhs.type->kind == Type::Kind::POINTER_TYPE) {
+            if (as_type<Pointer_type>(lhs.type)) {
                 if ((base != "+" && base != "-") ||
                     !rhs.type->is_integer() ||
                     !is_object_pointer(lhs.type)) {
@@ -368,7 +364,7 @@ class Semantic_analyzer {
             info.is_lvalue = rhs.is_lvalue;
         }
         else if ((op == "+" || op == "-") &&
-                 lhs.type->kind == Type::Kind::POINTER_TYPE &&
+                 as_type<Pointer_type>(lhs.type) &&
                  rhs.type->is_integer()) {
             if (!is_object_pointer(lhs.type)) {
                 error("pointer arithmetic requires complete object type");
@@ -377,27 +373,27 @@ class Semantic_analyzer {
         }
         else if (op == "+" &&
                  lhs.type->is_integer() &&
-                 rhs.type->kind == Type::Kind::POINTER_TYPE) {
+                 as_type<Pointer_type>(rhs.type)) {
             if (!is_object_pointer(rhs.type)) {
                 error("pointer arithmetic requires complete object type");
             }
             info.type = rhs.type;
         }
         else if (op == "-" &&
-                 lhs.type->kind == Type::Kind::POINTER_TYPE &&
-                 rhs.type->kind == Type::Kind::POINTER_TYPE) {
+                 as_type<Pointer_type>(lhs.type) &&
+                 as_type<Pointer_type>(rhs.type)) {
             if (!assignable(lhs.type, rhs.type) ||
                 !is_object_pointer(lhs.type) ||
                 !is_object_pointer(rhs.type)) {
                 error("pointer subtraction requires compatible types");
             }
-            info.type = Type::make_int();
+            info.type = integer_type;
         }
         else if (op == "&&" || op == "||") {
             if (!lhs.type->is_scalar() || !rhs.type->is_scalar()) {
                 error("logical operator requires scalar operands");
             }
-            info.type = Type::make_int();
+            info.type = integer_type;
         }
         else if (op == "==" || op == "!=" ||
                  op == "<" || op == "<=" ||
@@ -405,24 +401,24 @@ class Semantic_analyzer {
             bool integers =
                 lhs.type->is_integer() && rhs.type->is_integer();
             bool pointers =
-                lhs.type->kind == Type::Kind::POINTER_TYPE &&
-                rhs.type->kind == Type::Kind::POINTER_TYPE &&
+                as_type<Pointer_type>(lhs.type) &&
+                as_type<Pointer_type>(rhs.type) &&
                 assignable(lhs.type, rhs.type);
             bool null_pointer =
-                lhs.type->kind == Type::Kind::POINTER_TYPE &&
+                as_type<Pointer_type>(lhs.type) &&
                 is_null_pointer_constant(*node.rhs) ||
-                rhs.type->kind == Type::Kind::POINTER_TYPE &&
+                as_type<Pointer_type>(rhs.type) &&
                 is_null_pointer_constant(*node.lhs);
             if (!integers && !pointers && !null_pointer) {
                 error("comparison requires compatible scalar operands");
             }
-            info.type = Type::make_int();
+            info.type = integer_type;
         }
         else {
             if (!lhs.type->is_integer() || !rhs.type->is_integer()) {
                 error("binary operator requires integer operands");
             }
-            info.type = Type::make_int();
+            info.type = integer_type;
         }
         return info;
     }
@@ -431,47 +427,75 @@ class Semantic_analyzer {
         const parser::Call_expression &node) {
         auto callee = analyze_expression(*node.callee);
         Type_ptr function_type = callee.type;
-        if (function_type->kind == Type::Kind::POINTER_TYPE) {
-            function_type = function_type->element;
+        if (auto pointer = as_type<Pointer_type>(function_type)) {
+            function_type = pointer->element;
         }
-        if (function_type->kind != Type::Kind::FUNCTION_TYPE) {
+        auto function = as_type<Function_type>(function_type);
+        if (!function) {
             error("called expression is not a function");
         }
-        if (node.arguments.size() != function_type->parameters.size()) {
+        if (node.arguments.size() != function->parameters.size()) {
             error("wrong number of function arguments");
         }
         for (int i = 0; i < static_cast<int>(node.arguments.size()); i++) {
             auto argument = analyze_expression(*node.arguments[i]);
             if (!assignable(
-                    function_type->parameters[i],
+                    function->parameters[i],
                     argument.type) &&
-                !(function_type->parameters[i]->kind ==
-                      Type::Kind::POINTER_TYPE &&
+                !(as_type<Pointer_type>(function->parameters[i]) &&
                   is_null_pointer_constant(*node.arguments[i]))) {
                 error("incompatible function argument");
             }
         }
-        return Expression_info{function_type->return_type};
+        return Expression_info{function->return_type};
     }
 
     Expression_info analyze_expression_node(
         const parser::Subscript_expression &node) {
         auto object = analyze_expression(*node.object);
         auto index = analyze_expression(*node.index);
-        auto object_type = object.type->kind == Type::Kind::ARRAY_TYPE
+        auto object_type = as_type<Array_type>(object.type)
             ? object.type->decay()
             : object.type;
-        if (object_type->kind != Type::Kind::POINTER_TYPE ||
+        auto pointer = as_type<Pointer_type>(object_type);
+        if (!pointer ||
             !index.type->is_integer() ||
             !is_object_pointer(object_type)) {
             error("invalid array subscript");
         }
-        return Expression_info{object_type->element, true};
+        return Expression_info{pointer->element, true};
     }
 
     Expression_info analyze_expression_node(
-        const parser::Member_expression &) {
-        error("member access requires struct support");
+        const parser::Member_expression &node) {
+        auto object = analyze_expression(*node.object);
+        Type_ptr record_type = object.type;
+        bool is_lvalue = object.is_lvalue;
+
+        if (node.op.raw == "->") {
+            auto pointer = as_type<Pointer_type>(record_type);
+            if (!pointer) {
+                error("'->' requires pointer to struct");
+            }
+            record_type = pointer->element;
+            is_lvalue = true;
+        }
+
+        auto record = as_type<Record_type>(record_type);
+        if (!record || !record->defined) {
+            error("member access requires complete struct type");
+        }
+        int index = record->field_index(node.member.raw);
+        if (index < 0) {
+            error(
+                "struct '" + record->record_name +
+                "' has no member '" +
+                std::string(node.member.raw) + "'");
+        }
+        return Expression_info{
+            record->fields[index].type,
+            is_lvalue
+        };
     }
 
     Expression_info analyze_expression_node(
@@ -482,11 +506,11 @@ class Semantic_analyzer {
         if (!condition.type->is_scalar()) {
             error("conditional expression requires scalar condition");
         }
-        if (true_info.type->kind == Type::Kind::POINTER_TYPE &&
+        if (as_type<Pointer_type>(true_info.type) &&
             is_null_pointer_constant(*node.false_expression)) {
             return Expression_info{true_info.type};
         }
-        if (false_info.type->kind == Type::Kind::POINTER_TYPE &&
+        if (as_type<Pointer_type>(false_info.type) &&
             is_null_pointer_constant(*node.true_expression)) {
             return Expression_info{false_info.type};
         }
@@ -510,7 +534,7 @@ class Semantic_analyzer {
             for (int i = 0;
                  i < node.type->declarator->pointer_depth;
                  i++) {
-                type = Type::make_pointer(type);
+                type = make_pointer(type);
             }
         }
         return Expression_info{type};
@@ -534,18 +558,19 @@ class Semantic_analyzer {
         auto type = declarator_type(base, *item.declarator);
         Symbol::Kind kind = declaration.is_typedef
             ? Symbol::Kind::TYPEDEF_NAME
-            : type->kind == Type::Kind::FUNCTION_TYPE
+            : as_type<Function_type>(type)
                 ? Symbol::Kind::FUNCTION
                 : Symbol::Kind::VARIABLE;
 
+        auto array = as_type<Array_type>(type);
         if (kind == Symbol::Kind::VARIABLE &&
-            type->kind == Type::Kind::ARRAY_TYPE &&
-            !type->array_size &&
+            array &&
+            !array->size &&
             item.initializer) {
             if (auto list =
                     dynamic_cast<const parser::Initializer_list *>(
                         item.initializer.get())) {
-                type->array_size =
+                array->size =
                     static_cast<long long>(list->elements.size());
             }
             else if (auto expression_initializer =
@@ -558,11 +583,11 @@ class Semantic_analyzer {
                 if (primary &&
                     primary->token.type ==
                         lexer::token_type::STRING_CONSTANT &&
-                    type->element->kind == Type::Kind::CHAR_TYPE) {
+                    is_character(array->element)) {
                     auto value =
                         literal::decode_string(primary->token.raw);
                     if (!value) error("invalid string literal");
-                    type->array_size =
+                    array->size =
                         static_cast<long long>(value->size() + 1);
                 }
             }
@@ -604,8 +629,8 @@ class Semantic_analyzer {
         if (auto expression_initializer =
                 dynamic_cast<const parser::Expression_initializer *>(
                     &initializer)) {
-            if (target->kind == Type::Kind::ARRAY_TYPE &&
-                target->element->kind == Type::Kind::CHAR_TYPE) {
+            auto array = as_type<Array_type>(target);
+            if (array && is_character(array->element)) {
                 auto primary =
                     dynamic_cast<const parser::Primary_expression *>(
                         expression_initializer->expression.get());
@@ -615,9 +640,9 @@ class Semantic_analyzer {
                     auto value =
                         literal::decode_string(primary->token.raw);
                     if (!value) error("invalid string literal");
-                    if (target->array_size &&
+                    if (array->size &&
                         static_cast<long long>(value->size()) >
-                            *target->array_size) {
+                            *array->size) {
                         error("initializer string is too long");
                     }
                     analyze_expression(
@@ -629,7 +654,7 @@ class Semantic_analyzer {
             auto value = analyze_expression(
                 *expression_initializer->expression);
             if (!assignable(target, value.type) &&
-                !(target->kind == Type::Kind::POINTER_TYPE &&
+                !(as_type<Pointer_type>(target) &&
                   is_null_pointer_constant(
                       *expression_initializer->expression))) {
                 error("incompatible initializer");
@@ -642,7 +667,9 @@ class Semantic_analyzer {
         if (!list) {
             error("invalid initializer");
         }
-        if (target->kind != Type::Kind::ARRAY_TYPE) {
+        auto array = as_type<Array_type>(target);
+        auto record = as_type<Record_type>(target);
+        if (!array && !record) {
             if (list->elements.size() > 1) {
                 error("too many initializer elements");
             }
@@ -651,12 +678,28 @@ class Semantic_analyzer {
             }
             return;
         }
-        if (target->array_size &&
-            list->elements.size() > *target->array_size) {
+        if (record) {
+            if (!record->defined) {
+                error("initializer requires complete struct type");
+            }
+            if (list->elements.size() > record->fields.size()) {
+                error("too many initializer elements");
+            }
+            for (int i = 0;
+                 i < static_cast<int>(list->elements.size());
+                 i++) {
+                analyze_initializer(
+                    *list->elements[i],
+                    record->fields[i].type);
+            }
+            return;
+        }
+        if (array->size &&
+            list->elements.size() > *array->size) {
             error("too many initializer elements");
         }
         for (auto &element : list->elements) {
-            analyze_initializer(*element, target->element);
+            analyze_initializer(*element, array->element);
         }
     }
 
@@ -675,8 +718,62 @@ class Semantic_analyzer {
         }
     }
 
+    void analyze_struct_definition(
+        const parser::Struct_definition &definition) {
+        auto name = std::string(definition.name.raw);
+        if (scopes.back().types.contains(name) ||
+            scopes.back().symbols.contains(name)) {
+            error("redefinition of '" + name + "'");
+        }
+
+        auto record = std::make_shared<Record_type>(name);
+        scopes.back().types[name] = record;
+
+        std::unordered_set<std::string> field_names;
+        for (auto &declaration : definition.fields) {
+            if (declaration->is_static ||
+                declaration->is_typedef) {
+                error("invalid struct field specifier");
+            }
+            auto base = base_type(
+                declaration->type,
+                declaration->is_const);
+            for (auto &item : declaration->declarators) {
+                if (item->initializer) {
+                    error("struct field cannot have initializer");
+                }
+                auto type = declarator_type(
+                    base,
+                    *item->declarator);
+                if (as_type<Function_type>(type)) {
+                    error("struct field cannot have function type");
+                }
+                if (!type->is_complete()) {
+                    error(
+                        "struct field '" +
+                        std::string(item->declarator->name.raw) +
+                        "' has incomplete type");
+                }
+                auto field_name =
+                    std::string(item->declarator->name.raw);
+                if (!field_names.insert(field_name).second) {
+                    error(
+                        "duplicate struct member '" +
+                        field_name + "'");
+                }
+                record->fields.push_back({
+                    std::move(field_name),
+                    std::move(type)
+                });
+            }
+        }
+        record->defined = true;
+    }
+
     void analyze_statement(const parser::Statement &node);
     void analyze_statement_node(const parser::Block &node);
+    void analyze_statement_node(
+        const parser::Struct_definition &node);
     void analyze_statement_node(const parser::Declvariable &node);
     void analyze_statement_node(const parser::Expression_statement &node);
     void analyze_statement_node(const parser::Return_statement &node);
@@ -692,6 +789,11 @@ class Semantic_analyzer {
     void analyze_statement_node(const parser::Statement &node);
 
     void predeclare_global(const parser::Node &node) {
+        if (auto definition =
+                dynamic_cast<const parser::Struct_definition *>(&node)) {
+            analyze_struct_definition(*definition);
+            return;
+        }
         if (auto declaration =
                 dynamic_cast<const parser::Declvariable *>(&node)) {
             analyze_declaration(*declaration, true);
@@ -730,22 +832,25 @@ class Semantic_analyzer {
 
     void analyze_function(const parser::Function_definition &function) {
         auto symbol = result.symbol(*function.declarator);
-        current_return_type = symbol->type->return_type;
+        auto function_type = as_type<Function_type>(symbol->type);
+        if (!function_type) error("definition does not have function type");
+        current_return_type = function_type->return_type;
 
         push_scope();
         int parameter_index = 0;
         bool void_parameter_list =
             function.declarator->parameters.size() == 1 &&
-            function.declarator->parameters[0]->specifiers.type.raw ==
-                "void" &&
-            !function.declarator->parameters[0]->declarator;
+            !function.declarator->parameters[0]->declarator &&
+            is_void(base_type(
+                function.declarator->parameters[0]->specifiers.type,
+                function.declarator->parameters[0]->specifiers.is_const));
         for (auto &parameter : function.declarator->parameters) {
             if (!parameter->declarator) {
                 if (void_parameter_list) continue;
                 error("function definition parameter requires a name");
             }
             auto parameter_type =
-                symbol->type->parameters[parameter_index++];
+                function_type->parameters[parameter_index++];
             auto parameter_symbol = make_symbol(
                 Symbol::Kind::PARAMETER,
                 parameter->declarator->name.raw,
@@ -766,9 +871,27 @@ public:
         scopes.clear();
         push_scope();
 
-        scopes.back().types["void"] = Type::make_void();
-        scopes.back().types["char"] = Type::make_char();
-        scopes.back().types["int"] = Type::make_int();
+        void_type = std::make_shared<Primitive_type>(
+            "void",
+            Primitive_type::Category::VOID_TYPE,
+            0,
+            false);
+        character_type = std::make_shared<Primitive_type>(
+            "char",
+            Primitive_type::Category::CHARACTER,
+            8,
+            true);
+        integer_type = std::make_shared<Primitive_type>(
+            "int",
+            Primitive_type::Category::INTEGER,
+            32,
+            true);
+        result.void_type = void_type;
+        result.character_type = character_type;
+        result.integer_type = integer_type;
+        scopes.back().types[void_type->name()] = void_type;
+        scopes.back().types[character_type->name()] = character_type;
+        scopes.back().types[integer_type->name()] = integer_type;
 
         for (auto &external : program.external_declarations) {
             predeclare_global(*external);

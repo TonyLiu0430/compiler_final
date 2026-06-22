@@ -27,6 +27,7 @@
 #include "parser/reflect_dispatch.hpp"
 #include "semantic/constant_evaluator.hpp"
 #include "semantic/semantic_analyzer.hpp"
+#include "semantic/type_dispatch.hpp"
 
 namespace c9ay::codegen {
 
@@ -42,6 +43,8 @@ class LLVM_codegen {
     std::vector<std::unordered_map<std::string, llvm::Value *>> scopes;
     std::vector<Loop_target> loops;
     std::vector<llvm::BasicBlock *> break_targets;
+    std::unordered_map<const semantic::Record_identity *, llvm::StructType *>
+        record_types;
     llvm::Function *current_function = nullptr;
     semantic::Type_ptr current_return_type;
     semantic::Semantic_result semantic_result;
@@ -52,61 +55,95 @@ class LLVM_codegen {
     }
 
     llvm::Type *type_of(const semantic::Type_ptr &type) {
-        using Kind = semantic::Type::Kind;
-        if (type->kind == Kind::VOID_TYPE) {
+        return semantic::reflect::dispatch<llvm::Type *>(
+            *type,
+            [this](const auto &type_node) {
+                return type_node_of(type_node);
+            });
+    }
+
+    llvm::Type *type_node_of(
+        const semantic::Primitive_type &type) {
+        if (type.is_void()) {
             return llvm::Type::getVoidTy(context);
         }
-        if (type->kind == Kind::CHAR_TYPE) {
-            return llvm::Type::getInt8Ty(context);
+        return llvm::IntegerType::get(context, type.bit_width);
+    }
+
+    llvm::Type *type_node_of(
+        const semantic::Pointer_type &) {
+        return llvm::PointerType::get(context, 0);
+    }
+
+    llvm::Type *type_node_of(
+        const semantic::Array_type &type) {
+        if (!type.size) {
+            unsupported("incomplete array type");
         }
-        if (type->kind == Kind::INT_TYPE) {
-            return llvm::Type::getInt32Ty(context);
+        return llvm::ArrayType::get(
+            type_of(type.element),
+            *type.size);
+    }
+
+    llvm::Type *type_node_of(
+        const semantic::Function_type &type) {
+        std::vector<llvm::Type *> parameters;
+        for (auto &parameter : type.parameters) {
+            parameters.push_back(type_of(parameter));
         }
-        if (type->kind == Kind::POINTER_TYPE) {
-            return llvm::PointerType::get(context, 0);
-        }
-        if (type->kind == Kind::ARRAY_TYPE) {
-            if (!type->array_size) {
-                unsupported("incomplete array type");
+        return llvm::FunctionType::get(
+            type_of(type.return_type),
+            parameters,
+            false);
+    }
+
+    llvm::Type *type_node_of(
+        const semantic::Record_type &type) {
+        auto found = record_types.find(type.identity.get());
+        if (found != record_types.end()) return found->second;
+
+        auto result = llvm::StructType::create(
+            context,
+            type.record_name);
+        record_types[type.identity.get()] = result;
+        if (type.defined) {
+            std::vector<llvm::Type *> fields;
+            for (auto &field : type.fields) {
+                fields.push_back(type_of(field.type));
             }
-            return llvm::ArrayType::get(
-                type_of(type->element),
-                *type->array_size);
+            result->setBody(fields);
         }
-        if (type->kind == Kind::FUNCTION_TYPE) {
-            std::vector<llvm::Type *> parameters;
-            for (auto &parameter : type->parameters) {
-                parameters.push_back(type_of(parameter));
-            }
-            return llvm::FunctionType::get(
-                type_of(type->return_type),
-                parameters,
-                false);
-        }
+        return result;
+    }
+
+    llvm::Type *type_node_of(const semantic::Type &) {
         unsupported("semantic type");
     }
 
     llvm::Value *integer(long long value) {
+        return llvm::ConstantInt::get(
+            type_of(semantic_result.integer_type),
+            value,
+            true);
+    }
+
+    llvm::Value *index(int value) {
         return llvm::ConstantInt::get(
             llvm::Type::getInt32Ty(context),
             value,
             true);
     }
 
-    llvm::Value *as_i32(llvm::Value *value) {
+    llvm::Value *as_integer(llvm::Value *value) {
         if (!value) unsupported("void value used as expression");
-        if (value->getType()->isIntegerTy(32)) return value;
-        if (value->getType()->isIntegerTy(1)) {
-            return builder.CreateZExt(
+        auto target = type_of(semantic_result.integer_type);
+        if (value->getType() == target) return value;
+        if (value->getType()->isIntegerTy()) {
+            return builder.CreateIntCast(
                 value,
-                llvm::Type::getInt32Ty(context),
-                "bool");
-        }
-        if (value->getType()->isIntegerTy(8)) {
-            return builder.CreateSExt(
-                value,
-                llvm::Type::getInt32Ty(context),
-                "char");
+                target,
+                true,
+                "integer.promotion");
         }
         unsupported("non-integer expression");
     }
@@ -120,13 +157,15 @@ class LLVM_codegen {
 
         if (target->is_integer() &&
             value->getType()->isIntegerTy()) {
+            auto primitive =
+                semantic::as_type<semantic::Primitive_type>(target);
             return builder.CreateIntCast(
                 value,
                 target_type,
-                true,
+                !primitive || primitive->is_signed,
                 "integer.conversion");
         }
-        if (target->kind == semantic::Type::Kind::POINTER_TYPE &&
+        if (semantic::as_type<semantic::Pointer_type>(target) &&
             value->getType()->isIntegerTy()) {
             return builder.CreateIntToPtr(
                 value,
@@ -140,7 +179,7 @@ class LLVM_codegen {
                 target_type,
                 "integer.conversion");
         }
-        if (target->kind == semantic::Type::Kind::POINTER_TYPE &&
+        if (semantic::as_type<semantic::Pointer_type>(target) &&
             value->getType()->isPointerTy()) {
             return value;
         }
@@ -151,21 +190,22 @@ class LLVM_codegen {
         const semantic::Type_ptr &type,
         std::string_view raw) {
         auto value = literal::decode_string(raw);
+        auto array = semantic::as_type<semantic::Array_type>(type);
         if (!value ||
-            type->kind != semantic::Type::Kind::ARRAY_TYPE ||
-            type->element->kind != semantic::Type::Kind::CHAR_TYPE ||
-            !type->array_size) {
+            !array ||
+            !semantic::is_character(array->element) ||
+            !array->size) {
             unsupported("string initializer");
         }
 
         std::vector<llvm::Constant *> elements;
-        for (int i = 0; i < static_cast<int>(*type->array_size); i++) {
+        for (int i = 0; i < static_cast<int>(*array->size); i++) {
             unsigned char ch = 0;
             if (i < static_cast<int>(value->size())) {
                 ch = static_cast<unsigned char>((*value)[i]);
             }
             elements.push_back(llvm::ConstantInt::get(
-                llvm::Type::getInt8Ty(context),
+                type_of(array->element),
                 ch));
         }
         return llvm::ConstantArray::get(
@@ -190,9 +230,7 @@ class LLVM_codegen {
             "string");
         global->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
 
-        llvm::Constant *zero = llvm::ConstantInt::get(
-            llvm::Type::getInt32Ty(context),
-            0);
+        auto zero = llvm::cast<llvm::Constant>(index(0));
         std::vector<llvm::Constant *> indices = {zero, zero};
         return llvm::ConstantExpr::getInBoundsGetElementPtr(
             data->getType(),
@@ -208,7 +246,7 @@ class LLVM_codegen {
                     llvm::cast<llvm::PointerType>(value->getType())),
                 "condition");
         }
-        value = as_i32(value);
+        value = as_integer(value);
         return builder.CreateICmpNE(value, integer(0), "condition");
     }
 
@@ -266,7 +304,7 @@ class LLVM_codegen {
         if (auto subscript =
                 dynamic_cast<const parser::Subscript_expression *>(&expression)) {
             auto object = this->expression(*subscript->object);
-            auto index = as_i32(this->expression(*subscript->index));
+            auto index = as_integer(this->expression(*subscript->index));
             auto element_type =
                 semantic_result.info(expression).type;
             return builder.CreateGEP(
@@ -274,6 +312,39 @@ class LLVM_codegen {
                 object,
                 index,
                 "subscript.address");
+        }
+
+        if (auto member =
+                dynamic_cast<const parser::Member_expression *>(
+                    &expression)) {
+            auto object_type =
+                semantic_result.info(*member->object).type;
+            semantic::Type_ptr record_type = object_type;
+            llvm::Value *object_address = nullptr;
+
+            if (member->op.raw == "->") {
+                auto pointer =
+                    semantic::as_type<semantic::Pointer_type>(
+                        object_type);
+                if (!pointer) unsupported("member pointer type");
+                record_type = pointer->element;
+                object_address = this->expression(*member->object);
+            }
+            else {
+                object_address = lvalue(*member->object);
+            }
+
+            auto record =
+                semantic::as_type<semantic::Record_type>(record_type);
+            if (!record) unsupported("member record type");
+            int field_index =
+                record->field_index(member->member.raw);
+            if (field_index < 0) unsupported("member name");
+            return builder.CreateStructGEP(
+                type_of(record_type),
+                object_address,
+                field_index,
+                "member.address");
         }
 
         auto primary =
@@ -296,7 +367,8 @@ class LLVM_codegen {
         const parser::Declarator &declarator) {
         auto symbol = semantic_result.symbol(declarator);
         if (!symbol ||
-            symbol->type->kind != semantic::Type::Kind::FUNCTION_TYPE) {
+            !semantic::as_type<semantic::Function_type>(
+                symbol->type)) {
             unsupported("function semantic type");
         }
         auto function_type = llvm::cast<llvm::FunctionType>(
@@ -344,7 +416,7 @@ class LLVM_codegen {
         if (auto expression_initializer =
                 dynamic_cast<const parser::Expression_initializer *>(
                     &initializer)) {
-            if (type->kind == semantic::Type::Kind::ARRAY_TYPE) {
+            if (semantic::as_type<semantic::Array_type>(type)) {
                 auto primary =
                     dynamic_cast<const parser::Primary_expression *>(
                         expression_initializer->expression.get());
@@ -369,7 +441,9 @@ class LLVM_codegen {
         if (!list) {
             unsupported("initializer");
         }
-        if (type->kind != semantic::Type::Kind::ARRAY_TYPE) {
+        auto array = semantic::as_type<semantic::Array_type>(type);
+        auto record = semantic::as_type<semantic::Record_type>(type);
+        if (!array && !record) {
             if (list->elements.empty()) {
                 builder.CreateStore(
                     llvm::Constant::getNullValue(type_of(type)),
@@ -387,15 +461,31 @@ class LLVM_codegen {
         builder.CreateStore(
             llvm::Constant::getNullValue(type_of(type)),
             address);
+        if (record) {
+            for (int i = 0;
+                 i < static_cast<int>(list->elements.size());
+                 i++) {
+                auto field_address = builder.CreateStructGEP(
+                    type_of(type),
+                    address,
+                    i,
+                    "initializer.field");
+                store_initializer(
+                    *list->elements[i],
+                    record->fields[i].type,
+                    field_address);
+            }
+            return;
+        }
         for (int i = 0; i < static_cast<int>(list->elements.size()); i++) {
             auto element_address = builder.CreateInBoundsGEP(
                 type_of(type),
                 address,
-                {integer(0), integer(i)},
+                {index(0), index(i)},
                 "initializer.element");
             store_initializer(
                 *list->elements[i],
-                type->element,
+                array->element,
                 element_address);
         }
     }
@@ -426,6 +516,7 @@ class LLVM_codegen {
 
     void statement(const parser::Statement &node);
     void statement_node(const parser::Block &node);
+    void statement_node(const parser::Struct_definition &node);
     void statement_node(const parser::Declvariable &node);
     void statement_node(const parser::Expression_statement &node);
     void statement_node(const parser::Return_statement &node);
@@ -446,7 +537,7 @@ class LLVM_codegen {
         if (auto expression_initializer =
                 dynamic_cast<const parser::Expression_initializer *>(
                     &initializer)) {
-            if (type->kind == semantic::Type::Kind::ARRAY_TYPE) {
+            if (semantic::as_type<semantic::Array_type>(type)) {
                 auto primary =
                     dynamic_cast<const parser::Primary_expression *>(
                         expression_initializer->expression.get());
@@ -457,14 +548,14 @@ class LLVM_codegen {
                 }
             }
 
-            if (type->kind == semantic::Type::Kind::POINTER_TYPE) {
+            if (auto pointer =
+                    semantic::as_type<semantic::Pointer_type>(type)) {
                 if (auto primary =
                         dynamic_cast<const parser::Primary_expression *>(
                             expression_initializer->expression.get())) {
                     if (primary->token.type ==
                             lexer::token_type::STRING_CONSTANT &&
-                        type->element->kind ==
-                            semantic::Type::Kind::CHAR_TYPE) {
+                        semantic::is_character(pointer->element)) {
                         return string_pointer(primary->token.raw);
                     }
                     if (primary->token.type ==
@@ -483,7 +574,7 @@ class LLVM_codegen {
             if (!value) {
                 unsupported("non-constant global initializer");
             }
-            if (type->kind == semantic::Type::Kind::POINTER_TYPE) {
+            if (semantic::as_type<semantic::Pointer_type>(type)) {
                 if (value->value != 0) {
                     unsupported("non-null integer pointer initializer");
                 }
@@ -501,7 +592,9 @@ class LLVM_codegen {
         if (!list) {
             unsupported("global initializer");
         }
-        if (type->kind != semantic::Type::Kind::ARRAY_TYPE) {
+        auto array = semantic::as_type<semantic::Array_type>(type);
+        auto record = semantic::as_type<semantic::Record_type>(type);
+        if (!array && !record) {
             if (list->elements.empty()) {
                 return llvm::Constant::getNullValue(type_of(type));
             }
@@ -509,14 +602,34 @@ class LLVM_codegen {
         }
 
         std::vector<llvm::Constant *> elements;
+        if (record) {
+            for (int i = 0;
+                 i < static_cast<int>(list->elements.size());
+                 i++) {
+                elements.push_back(constant_initializer(
+                    *list->elements[i],
+                    record->fields[i].type));
+            }
+            for (int i = static_cast<int>(elements.size());
+                 i < static_cast<int>(record->fields.size());
+                 i++) {
+                elements.push_back(
+                    llvm::Constant::getNullValue(
+                        type_of(record->fields[i].type)));
+            }
+            return llvm::ConstantStruct::get(
+                llvm::cast<llvm::StructType>(type_of(type)),
+                elements);
+        }
         for (auto &element : list->elements) {
             elements.push_back(
-                constant_initializer(*element, type->element));
+                constant_initializer(*element, array->element));
         }
         while (static_cast<int>(elements.size()) <
-               static_cast<int>(*type->array_size)) {
+               static_cast<int>(*array->size)) {
             elements.push_back(
-                llvm::Constant::getNullValue(type_of(type->element)));
+                llvm::Constant::getNullValue(
+                    type_of(array->element)));
         }
         return llvm::ConstantArray::get(
             llvm::cast<llvm::ArrayType>(type_of(type)),
@@ -592,8 +705,12 @@ class LLVM_codegen {
         }
 
         current_function = function;
-        current_return_type = semantic_result.symbol(
-            *node.declarator)->type->return_type;
+        auto function_type =
+            semantic::as_type<semantic::Function_type>(
+                semantic_result.symbol(
+                    *node.declarator)->type);
+        if (!function_type) unsupported("function definition type");
+        current_return_type = function_type->return_type;
         auto entry = llvm::BasicBlock::Create(
             context,
             "entry",

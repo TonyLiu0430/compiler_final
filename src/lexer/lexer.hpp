@@ -36,6 +36,7 @@ enum class token_type {
     K_RETURN,
     K_BREAK,
     K_CONTINUE,
+    K_STRUCT,
     K_TYPEDEF,
     K_CONST,
     K_STATIC

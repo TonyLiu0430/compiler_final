@@ -48,11 +48,11 @@ inline llvm::Value *LLVM_codegen::expression_node(
     if (!type) unsupported("identifier load");
 
     auto semantic_type = semantic_result.info(node).type;
-    if (semantic_type->kind == semantic::Type::Kind::ARRAY_TYPE) {
+    if (semantic::as_type<semantic::Array_type>(semantic_type)) {
         return builder.CreateInBoundsGEP(
             type,
             address,
-            {integer(0), integer(0)},
+            {index(0), index(0)},
             "array.decay");
     }
     return builder.CreateLoad(
@@ -70,12 +70,13 @@ inline llvm::Value *LLVM_codegen::expression_node(
         auto old = expression(*node.operand);
         auto type = semantic_result.info(*node.operand).type;
         llvm::Value *value = nullptr;
-        if (type->kind == semantic::Type::Kind::POINTER_TYPE) {
+        if (auto pointer =
+                semantic::as_type<semantic::Pointer_type>(type)) {
             auto index = node.op.raw == "++"
                 ? integer(1)
                 : integer(-1);
             value = builder.CreateGEP(
-                type_of(type->element),
+                type_of(pointer->element),
                 old,
                 index,
                 "pointer.increment");
@@ -83,11 +84,11 @@ inline llvm::Value *LLVM_codegen::expression_node(
         else {
             value = node.op.raw == "++"
                 ? builder.CreateAdd(
-                      as_i32(old),
+                      as_integer(old),
                       integer(1),
                       "increment")
                 : builder.CreateSub(
-                      as_i32(old),
+                      as_integer(old),
                       integer(1),
                       "decrement");
             value = convert(value, type);
@@ -102,11 +103,11 @@ inline llvm::Value *LLVM_codegen::expression_node(
     if (node.op.raw == "*") {
         auto address = lvalue(node);
         auto type = semantic_result.info(node).type;
-        if (type->kind == semantic::Type::Kind::ARRAY_TYPE) {
+        if (semantic::as_type<semantic::Array_type>(type)) {
             return builder.CreateInBoundsGEP(
                 type_of(type),
                 address,
-                {integer(0), integer(0)},
+                {index(0), index(0)},
                 "array.decay");
         }
         return builder.CreateLoad(
@@ -115,13 +116,13 @@ inline llvm::Value *LLVM_codegen::expression_node(
             "dereference");
     }
 
-    auto operand = as_i32(expression(*node.operand));
+    auto operand = as_integer(expression(*node.operand));
     if (node.op.raw == "+") return operand;
     if (node.op.raw == "-") {
         return builder.CreateNeg(operand, "negative");
     }
     if (node.op.raw == "!") {
-        return as_i32(builder.CreateNot(
+        return as_integer(builder.CreateNot(
             as_condition(operand),
             "logical_not"));
     }
@@ -137,12 +138,13 @@ inline llvm::Value *LLVM_codegen::expression_node(
     auto old = expression(*node.operand);
     auto type = semantic_result.info(*node.operand).type;
     llvm::Value *value = nullptr;
-    if (type->kind == semantic::Type::Kind::POINTER_TYPE) {
+    if (auto pointer =
+            semantic::as_type<semantic::Pointer_type>(type)) {
         auto index = node.op.raw == "++"
             ? integer(1)
             : integer(-1);
         value = builder.CreateGEP(
-            type_of(type->element),
+            type_of(pointer->element),
             old,
             index,
             "pointer.increment");
@@ -150,11 +152,11 @@ inline llvm::Value *LLVM_codegen::expression_node(
     else {
         value = node.op.raw == "++"
             ? builder.CreateAdd(
-                  as_i32(old),
+                  as_integer(old),
                   integer(1),
                   "increment")
             : builder.CreateSub(
-                  as_i32(old),
+                  as_integer(old),
                   integer(1),
                   "decrement");
         value = convert(value, type);
@@ -180,21 +182,21 @@ inline llvm::Value *LLVM_codegen::expression_node(
         else {
             auto lhs = expression(*node.lhs);
             std::string_view base = op.substr(0, op.size() - 1);
-            if ((base == "+" || base == "-") &&
-                lhs_type->kind ==
-                    semantic::Type::Kind::POINTER_TYPE) {
-                auto index = as_i32(rhs);
+            if (auto pointer =
+                    semantic::as_type<semantic::Pointer_type>(lhs_type);
+                (base == "+" || base == "-") && pointer) {
+                auto index = as_integer(rhs);
                 if (base == "-") {
                     index = builder.CreateNeg(index);
                 }
                 rhs = builder.CreateGEP(
-                    type_of(lhs_type->element),
+                    type_of(pointer->element),
                     lhs,
                     index);
             }
             else {
-                lhs = as_i32(lhs);
-                rhs = as_i32(rhs);
+                lhs = as_integer(lhs);
+                rhs = as_integer(rhs);
                 if (base == "+") rhs = builder.CreateAdd(lhs, rhs);
                 else if (base == "-") rhs = builder.CreateSub(lhs, rhs);
                 else if (base == "*") rhs = builder.CreateMul(lhs, rhs);
@@ -251,21 +253,25 @@ inline llvm::Value *LLVM_codegen::expression_node(
             llvm::ConstantInt::getBool(context, op == "||"),
             lhs_block);
         phi->addIncoming(rhs, rhs_block);
-        return as_i32(phi);
+        return as_integer(phi);
     }
 
     auto lhs_type = semantic_result.info(*node.lhs).type;
     auto rhs_type = semantic_result.info(*node.rhs).type;
+    auto lhs_pointer =
+        semantic::as_type<semantic::Pointer_type>(lhs_type);
+    auto rhs_pointer =
+        semantic::as_type<semantic::Pointer_type>(rhs_type);
     if ((op == "+" || op == "-") &&
-        lhs_type->kind == semantic::Type::Kind::POINTER_TYPE &&
+        lhs_pointer &&
         rhs_type->is_integer()) {
         auto pointer = expression(*node.lhs);
-        auto index = as_i32(expression(*node.rhs));
+        auto index = as_integer(expression(*node.rhs));
         if (op == "-") {
             index = builder.CreateNeg(index, "negative.index");
         }
         return builder.CreateGEP(
-            type_of(lhs_type->element),
+            type_of(lhs_pointer->element),
             pointer,
             index,
             "pointer.offset");
@@ -273,17 +279,17 @@ inline llvm::Value *LLVM_codegen::expression_node(
 
     if (op == "+" &&
         lhs_type->is_integer() &&
-        rhs_type->kind == semantic::Type::Kind::POINTER_TYPE) {
+        rhs_pointer) {
         return builder.CreateGEP(
-            type_of(rhs_type->element),
+            type_of(rhs_pointer->element),
             expression(*node.rhs),
-            as_i32(expression(*node.lhs)),
+            as_integer(expression(*node.lhs)),
             "pointer.offset");
     }
 
     if (op == "-" &&
-        lhs_type->kind == semantic::Type::Kind::POINTER_TYPE &&
-        rhs_type->kind == semantic::Type::Kind::POINTER_TYPE) {
+        lhs_pointer &&
+        rhs_pointer) {
         auto integer_type = llvm::Type::getInt64Ty(context);
         auto lhs = builder.CreatePtrToInt(
             expression(*node.lhs),
@@ -293,29 +299,28 @@ inline llvm::Value *LLVM_codegen::expression_node(
             integer_type);
         auto bytes = builder.CreateSub(lhs, rhs, "pointer.bytes");
         auto element_size = llvm::ConstantExpr::getSizeOf(
-            type_of(lhs_type->element));
+            type_of(lhs_pointer->element));
         auto distance = builder.CreateSDiv(
             bytes,
             element_size,
             "pointer.distance");
-        return builder.CreateTrunc(
+        return builder.CreateIntCast(
             distance,
-            llvm::Type::getInt32Ty(context));
+            type_of(semantic_result.integer_type),
+            true);
     }
 
     if ((op == "==" || op == "!=" ||
          op == "<" || op == "<=" ||
          op == ">" || op == ">=") &&
-        (lhs_type->kind == semantic::Type::Kind::POINTER_TYPE ||
-         rhs_type->kind == semantic::Type::Kind::POINTER_TYPE)) {
+        (lhs_pointer || rhs_pointer)) {
         auto lhs = expression(*node.lhs);
         auto rhs = expression(*node.rhs);
-        if (lhs_type->kind == semantic::Type::Kind::POINTER_TYPE &&
+        if (lhs_pointer &&
             rhs_type->is_integer()) {
             rhs = convert(rhs, lhs_type);
         }
-        else if (rhs_type->kind ==
-                     semantic::Type::Kind::POINTER_TYPE &&
+        else if (rhs_pointer &&
                  lhs_type->is_integer()) {
             lhs = convert(lhs, rhs_type);
         }
@@ -326,11 +331,11 @@ inline llvm::Value *LLVM_codegen::expression_node(
         else if (op == "<=") comparison = builder.CreateICmpULE(lhs, rhs);
         else if (op == ">") comparison = builder.CreateICmpUGT(lhs, rhs);
         else comparison = builder.CreateICmpUGE(lhs, rhs);
-        return as_i32(comparison);
+        return as_integer(comparison);
     }
 
-    auto lhs = as_i32(expression(*node.lhs));
-    auto rhs = as_i32(expression(*node.rhs));
+    auto lhs = as_integer(expression(*node.lhs));
+    auto rhs = as_integer(expression(*node.rhs));
     if (op == "+") return builder.CreateAdd(lhs, rhs, "add");
     if (op == "-") return builder.CreateSub(lhs, rhs, "subtract");
     if (op == "*") return builder.CreateMul(lhs, rhs, "multiply");
@@ -341,21 +346,25 @@ inline llvm::Value *LLVM_codegen::expression_node(
     if (op == "&") return builder.CreateAnd(lhs, rhs, "bit_and");
     if (op == "^") return builder.CreateXor(lhs, rhs, "bit_xor");
     if (op == "|") return builder.CreateOr(lhs, rhs, "bit_or");
-    if (op == "==") return as_i32(builder.CreateICmpEQ(lhs, rhs));
-    if (op == "!=") return as_i32(builder.CreateICmpNE(lhs, rhs));
-    if (op == "<") return as_i32(builder.CreateICmpSLT(lhs, rhs));
-    if (op == "<=") return as_i32(builder.CreateICmpSLE(lhs, rhs));
-    if (op == ">") return as_i32(builder.CreateICmpSGT(lhs, rhs));
-    if (op == ">=") return as_i32(builder.CreateICmpSGE(lhs, rhs));
+    if (op == "==") return as_integer(builder.CreateICmpEQ(lhs, rhs));
+    if (op == "!=") return as_integer(builder.CreateICmpNE(lhs, rhs));
+    if (op == "<") return as_integer(builder.CreateICmpSLT(lhs, rhs));
+    if (op == "<=") return as_integer(builder.CreateICmpSLE(lhs, rhs));
+    if (op == ">") return as_integer(builder.CreateICmpSGT(lhs, rhs));
+    if (op == ">=") return as_integer(builder.CreateICmpSGE(lhs, rhs));
     unsupported("binary operator");
 }
 
 inline llvm::Value *LLVM_codegen::expression_node(
     const parser::Call_expression &node) {
     auto callee_type = semantic_result.info(*node.callee).type;
-    if (callee_type->kind == semantic::Type::Kind::POINTER_TYPE) {
-        callee_type = callee_type->element;
+    if (auto pointer =
+            semantic::as_type<semantic::Pointer_type>(callee_type)) {
+        callee_type = pointer->element;
     }
+    auto semantic_function =
+        semantic::as_type<semantic::Function_type>(callee_type);
+    if (!semantic_function) unsupported("call target type");
     auto function_type = llvm::cast<llvm::FunctionType>(
         type_of(callee_type));
     auto callee = expression(*node.callee);
@@ -366,7 +375,7 @@ inline llvm::Value *LLVM_codegen::expression_node(
         auto value = expression(*argument);
         value = convert(
             value,
-            callee_type->parameters[argument_index++]);
+            semantic_function->parameters[argument_index++]);
         arguments.push_back(value);
     }
     return builder.CreateCall(
@@ -380,11 +389,11 @@ inline llvm::Value *LLVM_codegen::expression_node(
     const parser::Subscript_expression &node) {
     auto address = lvalue(node);
     auto type = semantic_result.info(node).type;
-    if (type->kind == semantic::Type::Kind::ARRAY_TYPE) {
+    if (semantic::as_type<semantic::Array_type>(type)) {
         return builder.CreateInBoundsGEP(
             type_of(type),
             address,
-            {integer(0), integer(0)},
+            {index(0), index(0)},
             "array.decay");
     }
     return builder.CreateLoad(
@@ -394,8 +403,33 @@ inline llvm::Value *LLVM_codegen::expression_node(
 }
 
 inline llvm::Value *LLVM_codegen::expression_node(
-    const parser::Member_expression &) {
-    unsupported("member expression");
+    const parser::Member_expression &node) {
+    auto object_info = semantic_result.info(*node.object);
+    if (node.op.raw == "." && !object_info.is_lvalue) {
+        auto record =
+            semantic::as_type<semantic::Record_type>(object_info.type);
+        if (!record) unsupported("member record value");
+        int field_index = record->field_index(node.member.raw);
+        if (field_index < 0) unsupported("member name");
+        return builder.CreateExtractValue(
+            expression(*node.object),
+            field_index,
+            "member");
+    }
+
+    auto address = lvalue(node);
+    auto type = semantic_result.info(node).type;
+    if (semantic::as_type<semantic::Array_type>(type)) {
+        return builder.CreateInBoundsGEP(
+            type_of(type),
+            address,
+            {index(0), index(0)},
+            "member.array.decay");
+    }
+    return builder.CreateLoad(
+        type_of(type),
+        address,
+        "member");
 }
 
 inline llvm::Value *LLVM_codegen::expression_node(
@@ -420,7 +454,7 @@ inline llvm::Value *LLVM_codegen::expression_node(
     builder.SetInsertPoint(true_block);
     auto result_type = semantic_result.info(node).type;
     auto true_value = expression(*node.true_expression);
-    if (result_type->kind != semantic::Type::Kind::VOID_TYPE) {
+    if (!semantic::is_void(result_type)) {
         true_value = convert(true_value, result_type);
     }
     true_block = builder.GetInsertBlock();
@@ -428,14 +462,14 @@ inline llvm::Value *LLVM_codegen::expression_node(
 
     builder.SetInsertPoint(false_block);
     auto false_value = expression(*node.false_expression);
-    if (result_type->kind != semantic::Type::Kind::VOID_TYPE) {
+    if (!semantic::is_void(result_type)) {
         false_value = convert(false_value, result_type);
     }
     false_block = builder.GetInsertBlock();
     builder.CreateBr(merge_block);
 
     builder.SetInsertPoint(merge_block);
-    if (result_type->kind == semantic::Type::Kind::VOID_TYPE) {
+    if (semantic::is_void(result_type)) {
         return nullptr;
     }
     auto phi = builder.CreatePHI(
@@ -451,7 +485,7 @@ inline llvm::Value *LLVM_codegen::expression_node(
     const parser::Cast_expression &node) {
     auto value = expression(*node.operand);
     auto target = semantic_result.info(node).type;
-    if (target->kind == semantic::Type::Kind::VOID_TYPE) {
+    if (semantic::is_void(target)) {
         return nullptr;
     }
     return convert(value, target);

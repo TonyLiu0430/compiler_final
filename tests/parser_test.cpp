@@ -884,6 +884,105 @@ TEST_CASE("semantic analysis recognizes typedef names") {
     CHECK_NOTHROW(analyzer.analyze(*program));
 }
 
+TEST_CASE("struct definitions provide named record types") {
+    std::string source = R"(
+        struct Pair {
+            int first;
+            int second;
+        };
+
+        Pair global = {1, 2};
+
+        int sum(Pair *pair) {
+            return pair->first + pair->second;
+        }
+
+        int main() {
+            Pair local = {20, 22};
+            local.first += global.first;
+            return sum(&local);
+        }
+    )";
+
+    Reader reader("struct.c", source);
+    lexer::LexerMgr mgr(reader);
+    auto lexer = mgr.get_lexer();
+    auto program = parser::Program::match(lexer);
+
+    REQUIRE(program != nullptr);
+    REQUIRE_FALSE(program->error_occur);
+    REQUIRE(program->external_declarations.size() == 4);
+
+    auto definition =
+        dynamic_cast<parser::Struct_definition *>(
+            program->external_declarations[0].get());
+    REQUIRE(definition != nullptr);
+    CHECK(definition->name.raw == "Pair");
+    REQUIRE(definition->fields.size() == 2);
+
+    semantic::Semantic_analyzer analyzer;
+    CHECK_NOTHROW(analyzer.analyze(*program));
+
+    codegen::LLVM_codegen codegen("struct_codegen");
+    CHECK_NOTHROW(codegen.generate(*program));
+    auto ir = codegen.ir();
+    CHECK(ir.find("%Pair = type { i32, i32 }") != std::string::npos);
+    CHECK(ir.find("@global = global %Pair") != std::string::npos);
+    CHECK(ir.find("getelementptr") != std::string::npos);
+}
+
+TEST_CASE("semantic analysis validates struct members") {
+    std::string source = R"(
+        struct Pair {
+            int value;
+        };
+
+        int main() {
+            Pair pair;
+            return pair.missing;
+        }
+    )";
+
+    Reader reader("invalid-struct-member.c", source);
+    lexer::LexerMgr mgr(reader);
+    auto lexer = mgr.get_lexer();
+    auto program = parser::Program::match(lexer);
+
+    REQUIRE(program != nullptr);
+    REQUIRE_FALSE(program->error_occur);
+
+    semantic::Semantic_analyzer analyzer;
+    CHECK_THROWS_WITH_AS(
+        analyzer.analyze(*program),
+        "compile error: struct 'Pair' has no member 'missing'",
+        semantic::Compile_error);
+}
+
+TEST_CASE("local struct definitions stay in block scope") {
+    std::string source = R"(
+        int main() {
+            struct Local {
+                int value;
+            };
+            Local local = {42};
+            return local.value;
+        }
+    )";
+
+    Reader reader("local-struct.c", source);
+    lexer::LexerMgr mgr(reader);
+    auto lexer = mgr.get_lexer();
+    auto program = parser::Program::match(lexer);
+
+    REQUIRE(program != nullptr);
+    REQUIRE_FALSE(program->error_occur);
+
+    codegen::LLVM_codegen codegen("local_struct");
+    CHECK_NOTHROW(codegen.generate(*program));
+    CHECK(codegen.ir().find("%Local = type { i32 }") !=
+          std::string::npos);
+}
+
 TEST_CASE("LLVM codegen supports pointers arrays and initializer lists") {
     std::string source = R"(
         int values[4] = {10, 20, 30, 40};
@@ -1018,16 +1117,23 @@ TEST_CASE("nested declarators distinguish arrays from pointers to arrays") {
     auto function_pointer_type = result.symbol(
         *function_pointer_declaration->declarators[0]->declarator)->type;
 
-    CHECK(array_type->kind == semantic::Type::Kind::ARRAY_TYPE);
-    CHECK(array_type->element->kind ==
-          semantic::Type::Kind::POINTER_TYPE);
-    CHECK(pointer_type->kind == semantic::Type::Kind::POINTER_TYPE);
-    CHECK(pointer_type->element->kind ==
-          semantic::Type::Kind::ARRAY_TYPE);
-    CHECK(function_pointer_type->kind ==
-          semantic::Type::Kind::POINTER_TYPE);
-    CHECK(function_pointer_type->element->kind ==
-          semantic::Type::Kind::FUNCTION_TYPE);
+    auto array =
+        semantic::as_type<semantic::Array_type>(array_type);
+    auto pointer =
+        semantic::as_type<semantic::Pointer_type>(pointer_type);
+    auto function_pointer =
+        semantic::as_type<semantic::Pointer_type>(
+            function_pointer_type);
+
+    REQUIRE(array != nullptr);
+    CHECK(semantic::as_type<semantic::Pointer_type>(
+              array->element) != nullptr);
+    REQUIRE(pointer != nullptr);
+    CHECK(semantic::as_type<semantic::Array_type>(
+              pointer->element) != nullptr);
+    REQUIRE(function_pointer != nullptr);
+    CHECK(semantic::as_type<semantic::Function_type>(
+              function_pointer->element) != nullptr);
 }
 
 TEST_CASE("semantic array dimensions preserve C declarator order") {
@@ -1046,13 +1152,68 @@ TEST_CASE("semantic array dimensions preserve C declarator order") {
     REQUIRE(declaration != nullptr);
     auto type = result.symbol(
         *declaration->declarators[0]->declarator)->type;
-    REQUIRE(type->kind == semantic::Type::Kind::ARRAY_TYPE);
-    REQUIRE(type->array_size.has_value());
-    CHECK(*type->array_size == 3);
-    REQUIRE(type->element->kind ==
-            semantic::Type::Kind::ARRAY_TYPE);
-    REQUIRE(type->element->array_size.has_value());
-    CHECK(*type->element->array_size == 4);
+    auto outer = semantic::as_type<semantic::Array_type>(type);
+    REQUIRE(outer != nullptr);
+    REQUIRE(outer->size.has_value());
+    CHECK(*outer->size == 3);
+    auto inner =
+        semantic::as_type<semantic::Array_type>(outer->element);
+    REQUIRE(inner != nullptr);
+    REQUIRE(inner->size.has_value());
+    CHECK(*inner->size == 4);
+}
+
+TEST_CASE("typedef reuses the canonical semantic type object") {
+    std::string source = R"(
+        typedef int Integer;
+        Integer value;
+    )";
+
+    Reader reader("typedef-identity.c", source);
+    lexer::LexerMgr mgr(reader);
+    auto lexer = mgr.get_lexer();
+    auto program = parser::Program::match(lexer);
+
+    REQUIRE(program != nullptr);
+    REQUIRE_FALSE(program->error_occur);
+
+    semantic::Semantic_analyzer analyzer;
+    auto result = analyzer.analyze(*program);
+    auto alias_declaration =
+        dynamic_cast<parser::Declvariable *>(
+            program->external_declarations[0].get());
+    auto value_declaration =
+        dynamic_cast<parser::Declvariable *>(
+            program->external_declarations[1].get());
+
+    REQUIRE(alias_declaration != nullptr);
+    REQUIRE(value_declaration != nullptr);
+    auto alias = result.symbol(
+        *alias_declaration->declarators[0]->declarator);
+    auto value = result.symbol(
+        *value_declaration->declarators[0]->declarator);
+    REQUIRE(alias != nullptr);
+    REQUIRE(value != nullptr);
+    CHECK(alias->type == result.integer_type);
+    CHECK(value->type == alias->type);
+}
+
+TEST_CASE("record aliases preserve record type identity") {
+    auto integer = std::make_shared<semantic::Primitive_type>(
+        "int",
+        semantic::Primitive_type::Category::INTEGER,
+        32,
+        true);
+    auto record =
+        std::make_shared<semantic::Record_type>("Pair");
+    record->fields.push_back({"first", integer});
+    record->fields.push_back({"second", integer});
+    record->defined = true;
+
+    semantic::Type_ptr alias = record;
+    REQUIRE(alias == record);
+    CHECK(alias->is_complete());
+    CHECK(semantic::same_type(alias, record));
 }
 
 TEST_CASE("function pointer declarator is not a function definition") {
@@ -1119,8 +1280,10 @@ TEST_CASE("semantic analysis infers array size from initializer list") {
     REQUIRE(declaration != nullptr);
     auto type = result.symbol(
         *declaration->declarators[0]->declarator)->type;
-    REQUIRE(type->array_size.has_value());
-    CHECK(*type->array_size == 3);
+    auto array = semantic::as_type<semantic::Array_type>(type);
+    REQUIRE(array != nullptr);
+    REQUIRE(array->size.has_value());
+    CHECK(*array->size == 3);
 }
 
 TEST_CASE("semantic analysis rejects duplicate switch labels") {
