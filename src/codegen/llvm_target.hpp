@@ -111,21 +111,42 @@ public:
         const std::filesystem::path &object,
         const std::filesystem::path &executable,
         const std::vector<std::filesystem::path> &libraries = {}) {
-        auto gcc = llvm::sys::findProgramByName("gcc");
-        if (!gcc) {
+        auto linker = llvm::sys::findProgramByName("ld");
+        if (!linker) {
             throw std::runtime_error(
-                "cannot find MinGW gcc linker in PATH");
+                "cannot find MinGW ld linker in PATH");
+        }
+
+        auto toolchain = std::filesystem::path(*linker)
+            .parent_path()
+            .parent_path();
+        auto windows_library_directory =
+            toolchain / "x86_64-w64-mingw32" / "lib";
+        if (!std::filesystem::exists(
+                windows_library_directory / "libkernel32.a")) {
+            throw std::runtime_error(
+                "cannot find MinGW Windows API libraries beside ld");
         }
 
         std::vector<std::string> arguments_storage = {
-            *gcc,
+            *linker,
+            "-m",
+            "i386pep",
+            "--entry",
+            "_start",
+            "--subsystem",
+            "console",
+            "-o",
+            executable.string(),
             object.string()
         };
         for (auto &library : libraries) {
             arguments_storage.push_back(library.string());
         }
-        arguments_storage.push_back("-o");
-        arguments_storage.push_back(executable.string());
+        arguments_storage.push_back("-L");
+        arguments_storage.push_back(
+            windows_library_directory.string());
+        arguments_storage.push_back("-lkernel32");
         std::vector<llvm::StringRef> arguments;
         for (auto &argument : arguments_storage) {
             arguments.emplace_back(argument);
@@ -133,7 +154,7 @@ public:
 
         std::string error;
         int result = llvm::sys::ExecuteAndWait(
-            *gcc,
+            *linker,
             arguments,
             std::nullopt,
             {},

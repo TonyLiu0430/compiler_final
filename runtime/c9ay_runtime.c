@@ -1,5 +1,7 @@
 #include <c9ay.h>
 
+int main();
+
 void *GetStdHandle(int handle);
 int WriteFile(
     void *file,
@@ -7,6 +9,14 @@ int WriteFile(
     int size,
     int *written,
     void *overlapped);
+void ExitProcess(unsigned int exit_code);
+
+void __main() {
+}
+
+void _start() {
+    ExitProcess(main());
+}
 
 static int textLength(char *text) {
     int length = 0;
