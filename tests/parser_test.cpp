@@ -365,25 +365,29 @@ TEST_CASE("switch parses case default and fallthrough statements") {
     REQUIRE(switch_statement != nullptr);
     REQUIRE(switch_statement->condition != nullptr);
 
-    auto switch_body =
-        dynamic_cast<parser::Block *>(switch_statement->body.get());
-    REQUIRE(switch_body != nullptr);
-    REQUIRE(switch_body->statements.size() == 4);
+    auto &switch_body = *switch_statement->body;
+    REQUIRE(switch_body.sections.size() == 3);
 
-    auto case_zero =
-        dynamic_cast<parser::Case_statement *>(switch_body->statements[0].get());
-    auto case_one =
-        dynamic_cast<parser::Case_statement *>(switch_body->statements[2].get());
-    auto default_statement =
-        dynamic_cast<parser::Default_statement *>(switch_body->statements[3].get());
+    REQUIRE(switch_body.sections[0]->labels.size() == 1);
+    REQUIRE(switch_body.sections[0]->statements.size() == 2);
+    CHECK(!switch_body.sections[0]->labels[0]->is_default());
+    CHECK(dynamic_cast<parser::Expression_statement *>(
+              switch_body.sections[0]->statements[0].get()) != nullptr);
+    CHECK(dynamic_cast<parser::Break_statement *>(
+              switch_body.sections[0]->statements[1].get()) != nullptr);
 
-    REQUIRE(case_zero != nullptr);
-    REQUIRE(case_one != nullptr);
-    REQUIRE(default_statement != nullptr);
-    CHECK(dynamic_cast<parser::Expression_statement *>(case_zero->statement.get()) != nullptr);
-    CHECK(dynamic_cast<parser::Case_statement *>(case_one->statement.get()) != nullptr);
-    CHECK(dynamic_cast<parser::Expression_statement *>(default_statement->statement.get()) != nullptr);
-    CHECK(dynamic_cast<parser::Break_statement *>(switch_body->statements[1].get()) != nullptr);
+    REQUIRE(switch_body.sections[1]->labels.size() == 2);
+    REQUIRE(switch_body.sections[1]->statements.size() == 1);
+    CHECK(!switch_body.sections[1]->labels[0]->is_default());
+    CHECK(!switch_body.sections[1]->labels[1]->is_default());
+    CHECK(dynamic_cast<parser::Return_statement *>(
+              switch_body.sections[1]->statements[0].get()) != nullptr);
+
+    REQUIRE(switch_body.sections[2]->labels.size() == 1);
+    REQUIRE(switch_body.sections[2]->statements.size() == 1);
+    CHECK(switch_body.sections[2]->labels[0]->is_default());
+    CHECK(dynamic_cast<parser::Expression_statement *>(
+              switch_body.sections[2]->statements[0].get()) != nullptr);
 }
 
 TEST_CASE("typedef is parsed as a simplified declaration specifier") {

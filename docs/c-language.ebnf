@@ -124,7 +124,6 @@ statement =
   | struct-definition
   | if-statement
   | switch-statement
-  | labeled-statement
   | for-statement
   | while-statement
   | do-while-statement
@@ -149,16 +148,21 @@ switch-statement =
     "(",
     expression,
     ")",
-    statement ;
+    switch-body ;
 
-labeled-statement =
-    "case",
-    expression,
-    ":",
-    statement
-  | "default",
-    ":",
-    statement ;
+switch-body =
+    "{",
+    { switch-section },
+    "}" ;
+
+switch-section =
+    switch-label,
+    { switch-label },
+    { statement } ;
+
+switch-label =
+    "case", expression, ":"
+  | "default", ":" ;
 
 while-statement =
     "while",

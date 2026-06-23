@@ -681,8 +681,6 @@ class LLVM_codegen {
     void statement_node(const parser::For_statement &node);
     void statement_node(const parser::Break_statement &node);
     void statement_node(const parser::Continue_statement &node);
-    void statement_node(const parser::Case_statement &node);
-    void statement_node(const parser::Default_statement &node);
     void statement_node(const parser::Statement &node);
 
     llvm::Constant *constant_initializer(

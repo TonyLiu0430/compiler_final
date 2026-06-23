@@ -91,9 +91,6 @@ inline void LLVM_codegen::statement_node(
 
 inline void LLVM_codegen::statement_node(
     const parser::Switch_statement &node) {
-    auto body = dynamic_cast<const parser::Block *>(node.body.get());
-    if (!body) unsupported("switch body without block");
-
     auto end_block = llvm::BasicBlock::Create(
         context,
         "switch.end",
@@ -106,94 +103,52 @@ inline void LLVM_codegen::statement_node(
         condition,
         end_block);
 
-    struct Segment {
-        llvm::BasicBlock *block;
-        const parser::Statement *first;
-        int begin_index;
-        int end_index;
-    };
-    std::vector<Segment> segments;
-
-    int index = 0;
-    while (index < static_cast<int>(body->statements.size()) &&
-           !dynamic_cast<const parser::Case_statement *>(
-               body->statements[index].get()) &&
-           !dynamic_cast<const parser::Default_statement *>(
-               body->statements[index].get())) {
-        index++;
-    }
-
-    while (index < static_cast<int>(body->statements.size())) {
-        const parser::Statement *label =
-            body->statements[index].get();
-        auto block = llvm::BasicBlock::Create(
+    std::vector<llvm::BasicBlock *> section_blocks;
+    for (auto &section : node.body->sections) {
+        auto section_block = llvm::BasicBlock::Create(
             context,
             "switch.case",
             current_function);
-        const parser::Statement *payload = label;
+        section_blocks.push_back(section_block);
 
-        while (1) {
-            if (auto case_statement =
-                    dynamic_cast<const parser::Case_statement *>(
-                        payload)) {
-                auto value = constant_value(
-                    *case_statement->value);
+        for (auto &label : section->labels) {
+            if (label->is_default()) {
+                default_block = section_block;
+            }
+            else {
+                auto value = constant_value(*label->value);
                 if (!value) {
                     unsupported("non-constant switch case");
                 }
                 switch_instruction->addCase(
                     llvm::cast<llvm::ConstantInt>(
                         integer(condition_type, value->value)),
-                    block);
-                payload = case_statement->statement.get();
-                continue;
+                    section_block);
             }
-            if (auto default_statement =
-                    dynamic_cast<const parser::Default_statement *>(
-                        payload)) {
-                default_block = block;
-                payload = default_statement->statement.get();
-                continue;
-            }
-            break;
         }
-
-        int next = index + 1;
-        while (next < static_cast<int>(body->statements.size()) &&
-               !dynamic_cast<const parser::Case_statement *>(
-                   body->statements[next].get()) &&
-               !dynamic_cast<const parser::Default_statement *>(
-                   body->statements[next].get())) {
-            next++;
-        }
-        segments.push_back({
-            block,
-            payload,
-            index + 1,
-            next
-        });
-        index = next;
     }
 
     switch_instruction->setDefaultDest(default_block);
+    push_scope();
     break_targets.push_back(end_block);
-    for (int i = 0; i < static_cast<int>(segments.size()); i++) {
-        builder.SetInsertPoint(segments[i].block);
-        statement(*segments[i].first);
-        for (int child = segments[i].begin_index;
-             child < segments[i].end_index;
-             child++) {
-            statement(*body->statements[child]);
+    for (int i = 0;
+         i < static_cast<int>(node.body->sections.size());
+         i++) {
+        builder.SetInsertPoint(section_blocks[i]);
+        for (auto &statement :
+             node.body->sections[i]->statements) {
+            this->statement(*statement);
         }
 
         if (!is_terminated(builder.GetInsertBlock())) {
             builder.CreateBr(
-                i + 1 < static_cast<int>(segments.size())
-                    ? segments[i + 1].block
+                i + 1 < static_cast<int>(section_blocks.size())
+                    ? section_blocks[i + 1]
                     : end_block);
         }
     }
     break_targets.pop_back();
+    pop_scope();
     builder.SetInsertPoint(end_block);
 }
 
@@ -333,16 +288,6 @@ inline void LLVM_codegen::statement_node(
     const parser::Continue_statement &) {
     if (loops.empty()) unsupported("continue outside loop");
     builder.CreateBr(loops.back().continue_target);
-}
-
-inline void LLVM_codegen::statement_node(
-    const parser::Case_statement &) {
-    unsupported("case label outside switch block");
-}
-
-inline void LLVM_codegen::statement_node(
-    const parser::Default_statement &) {
-    unsupported("default label outside switch block");
 }
 
 inline void LLVM_codegen::statement_node(

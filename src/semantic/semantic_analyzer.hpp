@@ -1058,8 +1058,6 @@ class Semantic_analyzer {
     void analyze_statement_node(const parser::Return_statement &node);
     void analyze_statement_node(const parser::If_statement &node);
     void analyze_statement_node(const parser::Switch_statement &node);
-    void analyze_statement_node(const parser::Case_statement &node);
-    void analyze_statement_node(const parser::Default_statement &node);
     void analyze_statement_node(const parser::While_statement &node);
     void analyze_statement_node(const parser::Do_while_statement &node);
     void analyze_statement_node(const parser::For_statement &node);

@@ -39,30 +39,32 @@ struct If_statement : Statement {
     static std::unique_ptr<If_statement> match(lexer::Lexer &lexer);
 };
 
+struct Switch_label : Node {
+    std::unique_ptr<Expression> value;
+
+    bool is_default() const {
+        return !value;
+    }
+};
+
+struct Switch_section : Node {
+    std::vector<std::unique_ptr<Switch_label>> labels;
+    std::vector<std::unique_ptr<Statement>> statements;
+};
+
+struct Switch_body : Node {
+    std::vector<std::unique_ptr<Switch_section>> sections;
+
+    static std::unique_ptr<Switch_body> match(lexer::Lexer &lexer);
+};
+
 struct Switch_statement : Statement {
     static constexpr lexer::token_type start = lexer::token_type::K_SWITCH;
 
     std::unique_ptr<Expression> condition;
-    std::unique_ptr<Statement> body;
+    std::unique_ptr<Switch_body> body;
 
     static std::unique_ptr<Switch_statement> match(lexer::Lexer &lexer);
-};
-
-struct Case_statement : Statement {
-    static constexpr lexer::token_type start = lexer::token_type::K_CASE;
-
-    std::unique_ptr<Expression> value;
-    std::unique_ptr<Statement> statement;
-
-    static std::unique_ptr<Case_statement> match(lexer::Lexer &lexer);
-};
-
-struct Default_statement : Statement {
-    static constexpr lexer::token_type start = lexer::token_type::K_DEFAULT;
-
-    std::unique_ptr<Statement> statement;
-
-    static std::unique_ptr<Default_statement> match(lexer::Lexer &lexer);
 };
 
 struct While_statement : Statement {
@@ -512,39 +514,83 @@ inline std::unique_ptr<Switch_statement> Switch_statement::match(lexer::Lexer &l
     cur->error_occur |= cur->condition->error_occur;
     if (!expect_operator(lexer, ')', "expect ')' after switch condition")) return nullptr;
 
-    cur->body = Statement::match(lexer);
+    cur->body = Switch_body::match(lexer);
     if (!cur->body) return nullptr;
     cur->error_occur |= cur->body->error_occur;
     return cur;
 }
 
-inline std::unique_ptr<Case_statement> Case_statement::match(lexer::Lexer &lexer) {
-    auto cur = std::make_unique<Case_statement>();
-    assert_c9ay(lexer.next_token().match<lexer::token_type::K_CASE>());
-
-    cur->value = Expression::match(lexer);
-    cur->error_occur |= cur->value->error_occur;
-    if (!expect_operator(lexer, ':', "expect ':' after case expression")) {
+inline std::unique_ptr<Switch_body> Switch_body::match(
+    lexer::Lexer &lexer) {
+    type_names::Scope type_scope;
+    auto cur = std::make_unique<Switch_body>();
+    if (!expect_punctuarter(
+            lexer,
+            '{',
+            "expect '{' after switch condition")) {
         return nullptr;
     }
 
-    cur->statement = Statement::match(lexer);
-    if (!cur->statement) return nullptr;
-    cur->error_occur |= cur->statement->error_occur;
-    return cur;
-}
+    while (lexer.has_next() &&
+           !lexer.peek_next().match<
+               lexer::token_type::PUNCTUATOR>('}')) {
+        if (!lexer.peek_next().match<lexer::token_type::K_CASE>() &&
+            !lexer.peek_next().match<lexer::token_type::K_DEFAULT>()) {
+            lexer.report_error(
+                "switch body expect case or default label");
+            auto ignored = Statement::match(lexer);
+            if (!ignored) {
+                lexer.panic_recovery<Statement>();
+            }
+            cur->error_occur = true;
+            continue;
+        }
 
-inline std::unique_ptr<Default_statement> Default_statement::match(lexer::Lexer &lexer) {
-    auto cur = std::make_unique<Default_statement>();
-    assert_c9ay(lexer.next_token().match<lexer::token_type::K_DEFAULT>());
+        auto section = std::make_unique<Switch_section>();
+        while (lexer.has_next() &&
+               (lexer.peek_next().match<lexer::token_type::K_CASE>() ||
+                lexer.peek_next().match<lexer::token_type::K_DEFAULT>())) {
+            auto label = std::make_unique<Switch_label>();
+            if (lexer.next_token().match<lexer::token_type::K_CASE>()) {
+                label->value = Expression::match(lexer);
+                if (!label->value) return nullptr;
+                label->error_occur |= label->value->error_occur;
+            }
+            if (!expect_operator(
+                    lexer,
+                    ':',
+                    "expect ':' after switch label")) {
+                return nullptr;
+            }
+            section->error_occur |= label->error_occur;
+            section->labels.push_back(std::move(label));
+        }
 
-    if (!expect_operator(lexer, ':', "expect ':' after default")) {
-        return nullptr;
+        while (lexer.has_next() &&
+               !lexer.peek_next().match<
+                   lexer::token_type::PUNCTUATOR>('}') &&
+               !lexer.peek_next().match<lexer::token_type::K_CASE>() &&
+               !lexer.peek_next().match<lexer::token_type::K_DEFAULT>()) {
+            auto statement = Statement::match(lexer);
+            if (!statement) {
+                lexer.panic_recovery<Statement>();
+                section->error_occur = true;
+                continue;
+            }
+            section->error_occur |= statement->error_occur;
+            section->statements.push_back(std::move(statement));
+        }
+
+        cur->error_occur |= section->error_occur;
+        cur->sections.push_back(std::move(section));
     }
 
-    cur->statement = Statement::match(lexer);
-    if (!cur->statement) return nullptr;
-    cur->error_occur |= cur->statement->error_occur;
+    if (!expect_punctuarter(
+            lexer,
+            '}',
+            "expect '}' after switch body")) {
+        return nullptr;
+    }
     return cur;
 }
 

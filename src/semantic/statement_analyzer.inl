@@ -69,34 +69,34 @@ inline void Semantic_analyzer::analyze_statement_node(
     if (!analyze_expression(*node.condition).type->is_integer()) {
         error("switch condition must be integer");
     }
+
     switches.emplace_back();
-    analyze_statement(*node.body);
+    push_scope();
+    for (auto &section : node.body->sections) {
+        for (auto &label : section->labels) {
+            if (label->is_default()) {
+                if (switches.back().has_default) {
+                    error("multiple default labels in one switch");
+                }
+                switches.back().has_default = true;
+                continue;
+            }
+
+            auto value = evaluate_constant(*label->value);
+            if (!value) {
+                error("case value is not an integer constant");
+            }
+            if (!switches.back().cases.insert(value->value).second) {
+                error("duplicate case value");
+            }
+            analyze_expression(*label->value);
+        }
+        for (auto &statement : section->statements) {
+            analyze_statement(*statement);
+        }
+    }
+    pop_scope();
     switches.pop_back();
-}
-
-inline void Semantic_analyzer::analyze_statement_node(
-    const parser::Case_statement &node) {
-    if (switches.empty()) error("case outside switch");
-
-    auto value = evaluate_constant(*node.value);
-    if (!value) {
-        error("case value is not an integer constant");
-    }
-    if (!switches.back().cases.insert(value->value).second) {
-        error("duplicate case value");
-    }
-    analyze_expression(*node.value);
-    analyze_statement(*node.statement);
-}
-
-inline void Semantic_analyzer::analyze_statement_node(
-    const parser::Default_statement &node) {
-    if (switches.empty()) error("default outside switch");
-    if (switches.back().has_default) {
-        error("multiple default labels in one switch");
-    }
-    switches.back().has_default = true;
-    analyze_statement(*node.statement);
 }
 
 inline void Semantic_analyzer::analyze_statement_node(
