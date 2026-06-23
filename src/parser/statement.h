@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "parser/expression.h"
+#include "parser/type_specifier.hpp"
 #include "parser/type_names.hpp"
 
 namespace c9ay::parser {
@@ -121,9 +122,48 @@ struct Expression_statement : Statement {
 
 struct Declaration_specifiers {
     lexer::Token type;
+    std::string type_name;
+    bool type_known;
     bool is_const;
     bool is_static;
     bool is_typedef;
+
+    Declaration_specifiers(
+        lexer::Token _type,
+        std::string _type_name,
+        bool _is_const,
+        bool _is_static,
+        bool _is_typedef)
+        : type(_type),
+          type_name(std::move(_type_name)),
+          type_known(true),
+          is_const(_is_const),
+          is_static(_is_static),
+          is_typedef(_is_typedef) {}
+
+    Declaration_specifiers(
+        lexer::Token _type,
+        bool _is_const,
+        bool _is_static,
+        bool _is_typedef)
+        : type(_type),
+          type_name(_type.raw),
+          type_known(true),
+          is_const(_is_const),
+          is_static(_is_static),
+          is_typedef(_is_typedef) {}
+
+    Declaration_specifiers(
+        Parsed_type_specifier _type,
+        bool _is_const,
+        bool _is_static,
+        bool _is_typedef)
+        : type(_type.first),
+          type_name(std::move(_type.name)),
+          type_known(_type.known),
+          is_const(_is_const),
+          is_static(_is_static),
+          is_typedef(_is_typedef) {}
 };
 
 struct Parameter_declaration;
@@ -203,6 +243,7 @@ struct Struct_definition : Statement {
 
 struct Declvariable : Statement {
     lexer::Token type;
+    std::string type_name;
     bool is_const;
     bool is_static;
     bool is_typedef;
@@ -212,8 +253,13 @@ struct Declvariable : Statement {
         lexer::Token _type,
         bool _is_const,
         bool _is_static,
-        bool _is_typedef)
+        bool _is_typedef,
+        std::string _type_name = {})
         : type(_type),
+          type_name(
+              _type_name.empty()
+                  ? std::string(_type.raw)
+                  : std::move(_type_name)),
           is_const(_is_const),
           is_static(_is_static),
           is_typedef(_is_typedef) {}
@@ -283,13 +329,11 @@ inline std::optional<Declaration_specifiers> match_declaration_specifiers(
         lexer.next_token();
     }
 
-    if (!lexer.has_next() ||
-        !lexer.peek_next().match<lexer::token_type::IDENTIFIER>()) {
-        return std::nullopt;
-    }
+    auto type = match_type_specifier(lexer, true);
+    if (!type) return std::nullopt;
 
     return Declaration_specifiers{
-        lexer.next_token(),
+        std::move(*type),
         is_const,
         is_static,
         is_typedef
@@ -301,7 +345,7 @@ inline bool can_start_declarator(lexer::Lexer lexer);
 inline bool can_start_declaration(lexer::Lexer lexer) {
     auto specifiers = match_declaration_specifiers(lexer);
     if (!specifiers) return false;
-    if (type_names::contains(specifiers->type.raw)) {
+    if (specifiers->type_known) {
         return can_start_declarator(lexer);
     }
 
@@ -835,7 +879,8 @@ inline std::unique_ptr<Declvariable> Declvariable::match(lexer::Lexer &lexer) {
         specifiers->type,
         specifiers->is_const,
         specifiers->is_static,
-        specifiers->is_typedef);
+        specifiers->is_typedef,
+        specifiers->type_name);
 
     while (1) {
         auto declarator = Declarator::match(lexer);

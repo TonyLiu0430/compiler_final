@@ -1034,6 +1034,56 @@ TEST_CASE("LLVM optimization pipeline simplifies generated IR") {
     CHECK(optimized_ir.find("ret i32 42") != std::string::npos);
 }
 
+TEST_CASE("LLVM codegen uses target width for pointer differences") {
+    std::string source = R"(
+        long long distance(int *begin, int *end) {
+            return end - begin;
+        }
+    )";
+
+    Reader reader("ptrdiff.c", source);
+    lexer::LexerMgr mgr(reader);
+    auto lexer = mgr.get_lexer();
+    auto program = parser::Program::match(lexer);
+
+    REQUIRE(program != nullptr);
+    REQUIRE_FALSE(program->error_occur);
+
+    codegen::LLVM_codegen codegen("ptrdiff");
+    codegen.generate(*program);
+    auto ir = codegen.ir();
+    CHECK(ir.find("define i64 @distance") != std::string::npos);
+    CHECK(ir.find("ret i64") != std::string::npos);
+}
+
+TEST_CASE("LLVM codegen lowers floating arithmetic and conversions") {
+    std::string source = R"(
+        double calculate(float left, double right) {
+            return left * 2.0 + right;
+        }
+
+        int main() {
+            return (int)calculate(10.0f, 22.0);
+        }
+    )";
+
+    Reader reader("floating.c", source);
+    lexer::LexerMgr mgr(reader);
+    auto lexer = mgr.get_lexer();
+    auto program = parser::Program::match(lexer);
+
+    REQUIRE(program != nullptr);
+    REQUIRE_FALSE(program->error_occur);
+
+    codegen::LLVM_codegen codegen("floating");
+    CHECK_NOTHROW(codegen.generate(*program));
+    auto ir = codegen.ir();
+    CHECK(ir.find("fpext float") != std::string::npos);
+    CHECK(ir.find("fmul double") != std::string::npos);
+    CHECK(ir.find("fadd double") != std::string::npos);
+    CHECK(ir.find("fptosi double") != std::string::npos);
+}
+
 TEST_CASE("semantic analysis rejects unknown types before codegen") {
     std::string source = R"(
         Unknown global;

@@ -11,6 +11,7 @@
 #include <utility>
 #include <vector>
 
+#include "base/string_hash.hpp"
 #include "lexer/scanner.hpp"
 #include "preprocessor/constant_expression.hpp"
 #include "reader/reader.hpp"
@@ -36,7 +37,17 @@ class Preprocessor {
         bool active;
     };
 
-    std::unordered_map<std::string, Macro> macros;
+    using Macro_map = std::unordered_map<
+        std::string,
+        Macro,
+        Transparent_string_hash,
+        Transparent_string_equal>;
+    using Name_set = std::unordered_set<
+        std::string,
+        Transparent_string_hash,
+        Transparent_string_equal>;
+
+    Macro_map macros;
     std::vector<std::filesystem::path> include_paths;
     Source_range current_range;
 
@@ -255,7 +266,7 @@ class Preprocessor {
 
     std::string expand_text(
         std::string_view text,
-        std::unordered_set<std::string> disabled = {}) {
+        Name_set disabled = {}) {
         std::string result;
         int cnt = 0;
 
@@ -273,7 +284,7 @@ class Preprocessor {
                 continue;
             }
 
-            std::string name(token.raw);
+            auto name = token.raw;
             auto found = macros.find(name);
             if (found == macros.end() || disabled.contains(name)) {
                 result.append(name);
@@ -282,7 +293,7 @@ class Preprocessor {
 
             Macro &macro = found->second;
             auto next_disabled = disabled;
-            next_disabled.insert(name);
+            next_disabled.insert(std::string(name));
 
             if (!macro.function_like) {
                 result += expand_text(macro.replacement, std::move(next_disabled));

@@ -31,6 +31,7 @@
 #include <llvm/Transforms/Utils.h>
 
 #include "base/literal.hpp"
+#include "base/string_hash.hpp"
 #include "codegen/llvm_target.hpp"
 #include "codegen/optimization.hpp"
 #include "parser/parser.h"
@@ -50,7 +51,12 @@ class LLVM_codegen {
     llvm::LLVMContext context;
     std::unique_ptr<llvm::Module> module;
     llvm::IRBuilder<> builder;
-    std::vector<std::unordered_map<std::string, llvm::Value *>> scopes;
+    using Value_scope = std::unordered_map<
+        std::string,
+        llvm::Value *,
+        Transparent_string_hash,
+        Transparent_string_equal>;
+    std::vector<Value_scope> scopes;
     std::vector<Loop_target> loops;
     std::vector<llvm::BasicBlock *> break_targets;
     std::unordered_map<const semantic::Record_identity *, llvm::StructType *>
@@ -77,6 +83,18 @@ class LLVM_codegen {
         const semantic::Primitive_type &type) {
         if (type.is_void()) {
             return llvm::Type::getVoidTy(context);
+        }
+        if (type.is_floating()) {
+            if (type.bit_width == 32) {
+                return llvm::Type::getFloatTy(context);
+            }
+            if (type.bit_width == 64) {
+                return llvm::Type::getDoubleTy(context);
+            }
+            if (type.bit_width == 80) {
+                return llvm::Type::getX86_FP80Ty(context);
+            }
+            unsupported("floating point type");
         }
         return llvm::IntegerType::get(context, type.bit_width);
     }
@@ -138,6 +156,30 @@ class LLVM_codegen {
             true);
     }
 
+    llvm::Value *integer(
+        const semantic::Type_ptr &type,
+        long long value) {
+        auto primitive =
+            semantic::as_type<semantic::Primitive_type>(type);
+        return llvm::ConstantInt::get(
+            type_of(type),
+            value,
+            !primitive || primitive->is_signed);
+    }
+
+    llvm::Value *floating(
+        const semantic::Type_ptr &type,
+        std::string_view raw) {
+        if (!raw.empty() &&
+            (raw.back() == 'f' || raw.back() == 'F' ||
+             raw.back() == 'l' || raw.back() == 'L')) {
+            raw.remove_suffix(1);
+        }
+        return llvm::ConstantFP::get(
+            type_of(type),
+            llvm::StringRef(raw.data(), raw.size()));
+    }
+
     llvm::Value *index(int value) {
         return llvm::ConstantInt::get(
             llvm::Type::getInt32Ty(context),
@@ -159,9 +201,25 @@ class LLVM_codegen {
         unsupported("non-integer expression");
     }
 
+    llvm::Value *as_index(
+        llvm::Value *value,
+        const semantic::Type_ptr &source = nullptr) {
+        if (!value || !value->getType()->isIntegerTy()) {
+            unsupported("non-integer index");
+        }
+        auto primitive =
+            semantic::as_type<semantic::Primitive_type>(source);
+        return builder.CreateIntCast(
+            value,
+            type_of(semantic_result.ptrdiff_type),
+            !primitive || primitive->is_signed,
+            "index");
+    }
+
     llvm::Value *convert(
         llvm::Value *value,
-        const semantic::Type_ptr &target) {
+        const semantic::Type_ptr &target,
+        const semantic::Type_ptr &source = nullptr) {
         if (!value) unsupported("void value used as expression");
         auto target_type = type_of(target);
         if (value->getType() == target_type) return value;
@@ -169,12 +227,47 @@ class LLVM_codegen {
         if (target->is_integer() &&
             value->getType()->isIntegerTy()) {
             auto primitive =
-                semantic::as_type<semantic::Primitive_type>(target);
+                semantic::as_type<semantic::Primitive_type>(source);
             return builder.CreateIntCast(
                 value,
                 target_type,
                 !primitive || primitive->is_signed,
                 "integer.conversion");
+        }
+        if (target->is_floating() &&
+            value->getType()->isFloatingPointTy()) {
+            return builder.CreateFPCast(
+                value,
+                target_type,
+                "floating.conversion");
+        }
+        if (target->is_floating() &&
+            value->getType()->isIntegerTy()) {
+            auto primitive =
+                semantic::as_type<semantic::Primitive_type>(source);
+            return primitive && !primitive->is_signed
+                ? builder.CreateUIToFP(
+                      value,
+                      target_type,
+                      "floating.conversion")
+                : builder.CreateSIToFP(
+                      value,
+                      target_type,
+                      "floating.conversion");
+        }
+        if (target->is_integer() &&
+            value->getType()->isFloatingPointTy()) {
+            auto primitive =
+                semantic::as_type<semantic::Primitive_type>(target);
+            return primitive && !primitive->is_signed
+                ? builder.CreateFPToUI(
+                      value,
+                      target_type,
+                      "integer.conversion")
+                : builder.CreateFPToSI(
+                      value,
+                      target_type,
+                      "integer.conversion");
         }
         if (semantic::as_type<semantic::Pointer_type>(target) &&
             value->getType()->isIntegerTy()) {
@@ -195,6 +288,32 @@ class LLVM_codegen {
             return value;
         }
         unsupported("type conversion");
+    }
+
+    semantic::Type_ptr common_arithmetic_type(
+        const semantic::Type_ptr &lhs,
+        const semantic::Type_ptr &rhs) {
+        auto lhs_primitive =
+            semantic::as_type<semantic::Primitive_type>(lhs);
+        auto rhs_primitive =
+            semantic::as_type<semantic::Primitive_type>(rhs);
+        if (!lhs_primitive || !rhs_primitive) {
+            unsupported("arithmetic semantic type");
+        }
+        if (lhs_primitive->is_floating() ||
+            rhs_primitive->is_floating()) {
+            if (!lhs_primitive->is_floating()) return rhs;
+            if (!rhs_primitive->is_floating()) return lhs;
+        }
+        if (lhs_primitive->rank != rhs_primitive->rank) {
+            return lhs_primitive->rank > rhs_primitive->rank
+                ? lhs
+                : rhs;
+        }
+        if (lhs_primitive->is_signed != rhs_primitive->is_signed) {
+            return lhs_primitive->is_signed ? rhs : lhs;
+        }
+        return lhs;
     }
 
     llvm::Constant *string_initializer(
@@ -257,6 +376,12 @@ class LLVM_codegen {
                     llvm::cast<llvm::PointerType>(value->getType())),
                 "condition");
         }
+        if (value->getType()->isFloatingPointTy()) {
+            return builder.CreateFCmpONE(
+                value,
+                llvm::ConstantFP::getZero(value->getType()),
+                "condition");
+        }
         value = as_integer(value);
         return builder.CreateICmpNE(value, integer(0), "condition");
     }
@@ -297,12 +422,14 @@ class LLVM_codegen {
 
     void declare(std::string_view name, llvm::Value *address) {
         if (scopes.empty()) push_scope();
-        scopes.back()[std::string(name)] = address;
+        scopes.back().insert_or_assign(
+            std::string(name),
+            address);
     }
 
     llvm::Value *find_address(std::string_view name) {
         for (int i = static_cast<int>(scopes.size()) - 1; i >= 0; i--) {
-            auto found = scopes[i].find(std::string(name));
+            auto found = scopes[i].find(name);
             if (found != scopes[i].end()) return found->second;
         }
 
@@ -324,7 +451,9 @@ class LLVM_codegen {
         if (auto subscript =
                 dynamic_cast<const parser::Subscript_expression *>(&expression)) {
             auto object = this->expression(*subscript->object);
-            auto index = as_integer(this->expression(*subscript->index));
+            auto index = as_index(
+                this->expression(*subscript->index),
+                semantic_result.info(*subscript->index).type);
             auto element_type =
                 semantic_result.info(expression).type;
             return builder.CreateGEP(
@@ -453,7 +582,10 @@ class LLVM_codegen {
             }
 
             auto value = expression(*expression_initializer->expression);
-            value = convert(value, type);
+            auto source_type =
+                semantic_result.info(
+                    *expression_initializer->expression).type;
+            value = convert(value, type, source_type);
             builder.CreateStore(value, address);
             return;
         }
@@ -591,6 +723,23 @@ class LLVM_codegen {
                 }
             }
 
+            if (type->is_floating()) {
+                auto primary =
+                    dynamic_cast<const parser::Primary_expression *>(
+                        expression_initializer->expression.get());
+                if (!primary ||
+                    primary->token.type != lexer::token_type::NUMBER) {
+                    unsupported(
+                        "non-constant floating global initializer");
+                }
+                auto source_type =
+                    semantic_result.info(*primary).type;
+                auto value = llvm::cast<llvm::Constant>(
+                    floating(source_type, primary->token.raw));
+                return llvm::cast<llvm::Constant>(
+                    convert(value, type, source_type));
+            }
+
             auto value = constant_value(
                 *expression_initializer->expression);
             if (!value) {
@@ -668,6 +817,7 @@ class LLVM_codegen {
             if (symbol->kind == semantic::Symbol::Kind::FUNCTION) {
                 parser::Declaration_specifiers specifiers{
                     node.type,
+                    node.type_name,
                     node.is_const,
                     node.is_static,
                     node.is_typedef
@@ -703,6 +853,7 @@ class LLVM_codegen {
 
         parser::Declaration_specifiers specifiers{
             node.type,
+            node.type_name,
             node.is_const,
             node.is_static,
             node.is_typedef

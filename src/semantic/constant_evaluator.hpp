@@ -20,6 +20,10 @@ class Constant_evaluator {
     static Result parse_number(std::string_view raw) {
         long long value = 0;
         for (char ch : raw) {
+            if (ch == 'u' || ch == 'U' ||
+                ch == 'l' || ch == 'L') {
+                continue;
+            }
             if (ch < '0' || ch > '9') return std::nullopt;
             value = value * 10 + (ch - '0');
         }

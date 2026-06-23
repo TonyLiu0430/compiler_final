@@ -137,8 +137,35 @@ inline Token next_token(std::string_view source, int &cnt) {
     if (std::isdigit(static_cast<unsigned char>(ch))) {
         cnt++;
         while (cnt < static_cast<int>(source.size()) &&
-               (std::isdigit(static_cast<unsigned char>(source[cnt])) ||
-                source[cnt] == '.')) {
+               std::isdigit(static_cast<unsigned char>(source[cnt]))) {
+            cnt++;
+        }
+        if (cnt < static_cast<int>(source.size()) &&
+            source[cnt] == '.') {
+            cnt++;
+            while (cnt < static_cast<int>(source.size()) &&
+                   std::isdigit(
+                       static_cast<unsigned char>(source[cnt]))) {
+                cnt++;
+            }
+        }
+        if (cnt < static_cast<int>(source.size()) &&
+            (source[cnt] == 'e' || source[cnt] == 'E')) {
+            cnt++;
+            if (cnt < static_cast<int>(source.size()) &&
+                (source[cnt] == '+' || source[cnt] == '-')) {
+                cnt++;
+            }
+            while (cnt < static_cast<int>(source.size()) &&
+                   std::isdigit(
+                       static_cast<unsigned char>(source[cnt]))) {
+                cnt++;
+            }
+        }
+        while (cnt < static_cast<int>(source.size()) &&
+               (source[cnt] == 'u' || source[cnt] == 'U' ||
+                source[cnt] == 'l' || source[cnt] == 'L' ||
+                source[cnt] == 'f' || source[cnt] == 'F')) {
             cnt++;
         }
         return Token{

@@ -44,7 +44,8 @@ inline void LLVM_codegen::statement_node(
         node.expression
             ? convert(
                   expression(*node.expression),
-                  current_return_type)
+                  current_return_type,
+                  semantic_result.info(*node.expression).type)
             : convert(integer(0), current_return_type));
 }
 
@@ -98,7 +99,9 @@ inline void LLVM_codegen::statement_node(
         "switch.end",
         current_function);
     auto default_block = end_block;
-    auto condition = as_integer(expression(*node.condition));
+    auto condition = expression(*node.condition);
+    auto condition_type =
+        semantic_result.info(*node.condition).type;
     auto switch_instruction = builder.CreateSwitch(
         condition,
         end_block);
@@ -140,7 +143,7 @@ inline void LLVM_codegen::statement_node(
                 }
                 switch_instruction->addCase(
                     llvm::cast<llvm::ConstantInt>(
-                        integer(value->value)),
+                        integer(condition_type, value->value)),
                     block);
                 payload = case_statement->statement.get();
                 continue;

@@ -204,6 +204,7 @@ if(BUILD_TESTING)
     endif()
 
     if(MINGW AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        target_compile_options(compiler_tests PRIVATE -Wa,-mbig-obj)
         target_link_libraries(compiler_tests PRIVATE stdc++exp)
         target_link_options(compiler_tests PRIVATE -s)
     endif()

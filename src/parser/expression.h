@@ -7,6 +7,7 @@
 
 #include "lexer/lexer.hpp"
 #include "parser/node.h"
+#include "parser/type_specifier.hpp"
 #include "parser/type_names.hpp"
 
 namespace c9ay::parser {
@@ -146,11 +147,16 @@ struct Abstract_declarator : Node {
 
 struct Type_name : Node {
     lexer::Token type;
+    std::string type_name;
     bool is_const = false;
     std::unique_ptr<Abstract_declarator> declarator;
 
-    Type_name(lexer::Token _type, bool _is_const)
-        : type(_type), is_const(_is_const) {}
+    Type_name(
+        Parsed_type_specifier _type,
+        bool _is_const)
+        : type(_type.first),
+          type_name(std::move(_type.name)),
+          is_const(_is_const) {}
 
     static std::unique_ptr<Type_name> try_match(lexer::Lexer &lexer);
 };
@@ -290,14 +296,11 @@ inline std::unique_ptr<Type_name> Type_name::try_match(lexer::Lexer &lexer) {
         is_const = true;
     }
 
-    if (!lexer.has_next() ||
-        !lexer.peek_next().match<lexer::token_type::IDENTIFIER>() ||
-        !type_names::contains(lexer.peek_next().raw)) {
-        return nullptr;
-    }
+    auto type = match_type_specifier(lexer);
+    if (!type) return nullptr;
 
     auto cur = std::make_unique<Type_name>(
-        lexer.next_token(), is_const);
+        std::move(*type), is_const);
 
     while (lexer.has_next() &&
            lexer.peek_next().match<lexer::token_type::K_CONST>()) {

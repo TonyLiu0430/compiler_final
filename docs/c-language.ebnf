@@ -45,6 +45,22 @@ type-qualifier =
     "const" ;
 
 type-specifier =
+    typedef-name
+  | "void"
+  | "_Bool"
+  | "char"
+  | "signed", [ "char" | integer-type ]
+  | "unsigned", [ "char" | integer-type ]
+  | integer-type
+  | "float"
+  | "double"
+  | "long", "double" ;
+
+integer-type =
+    [ "short" | "long", [ "long" ] ],
+    [ "int" ] ;
+
+typedef-name =
     IDENTIFIER ;
 
 init-declarator-list =

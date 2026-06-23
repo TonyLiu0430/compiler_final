@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "base/literal.hpp"
+#include "base/string_hash.hpp"
 #include "diagnostic/diagnostic.hpp"
 #include "parser/parser.h"
 #include "parser/reflect_dispatch.hpp"
@@ -26,8 +27,16 @@ public:
 
 class Semantic_analyzer {
     struct Scope {
-        std::unordered_map<std::string, Symbol *> symbols;
-        std::unordered_map<std::string, Type_ptr> types;
+        std::unordered_map<
+            std::string,
+            Symbol *,
+            Transparent_string_hash,
+            Transparent_string_equal> symbols;
+        std::unordered_map<
+            std::string,
+            Type_ptr,
+            Transparent_string_hash,
+            Transparent_string_equal> types;
     };
 
     struct Switch_context {
@@ -41,6 +50,11 @@ class Semantic_analyzer {
     Type_ptr void_type;
     Type_ptr character_type;
     Type_ptr integer_type;
+    Type_ptr float_type;
+    Type_ptr double_type;
+    Type_ptr long_double_type;
+    Type_ptr size_type;
+    Type_ptr ptrdiff_type;
     Type_ptr current_return_type;
     Type_layout type_layout;
     Diagnostic *diagnostics = nullptr;
@@ -123,7 +137,7 @@ class Semantic_analyzer {
 
     Type_ptr find_type(std::string_view name) {
         for (int i = static_cast<int>(scopes.size()) - 1; i >= 0; i--) {
-            auto found = scopes[i].types.find(std::string(name));
+            auto found = scopes[i].types.find(name);
             if (found != scopes[i].types.end()) return found->second;
         }
         return nullptr;
@@ -131,7 +145,7 @@ class Semantic_analyzer {
 
     Symbol *find_symbol(std::string_view name) {
         for (int i = static_cast<int>(scopes.size()) - 1; i >= 0; i--) {
-            auto found = scopes[i].symbols.find(std::string(name));
+            auto found = scopes[i].symbols.find(name);
             if (found != scopes[i].symbols.end()) return found->second;
         }
         return nullptr;
@@ -140,9 +154,15 @@ class Semantic_analyzer {
     Type_ptr base_type(
         lexer::Token token,
         bool is_const = false) {
-        Type_ptr type = find_type(token.raw);
+        return base_type(token.raw, is_const);
+    }
+
+    Type_ptr base_type(
+        std::string_view name,
+        bool is_const = false) {
+        Type_ptr type = find_type(name);
         if (!type) {
-            error("unknown type '" + std::string(token.raw) + "'");
+            error("unknown type '" + std::string(name) + "'");
         }
         return qualify(type, is_const);
     }
@@ -214,7 +234,7 @@ class Semantic_analyzer {
     }
 
     Type_ptr type_name(const parser::Type_name &node) {
-        Type_ptr type = base_type(node.type, node.is_const);
+        Type_ptr type = base_type(node.type_name, node.is_const);
         if (!node.declarator) return type;
 
         for (int i = 0;
@@ -283,13 +303,13 @@ class Semantic_analyzer {
                 declarator.parameters.size() == 1 &&
                 !declarator.parameters[0]->declarator &&
                 is_void(base_type(
-                    declarator.parameters[0]->specifiers.type,
+                    declarator.parameters[0]->specifiers.type_name,
                     declarator.parameters[0]->specifiers.is_const));
 
             if (!void_parameter_list) {
                 for (auto &parameter : declarator.parameters) {
                     auto parameter_base = base_type(
-                        parameter->specifiers.type,
+                        parameter->specifiers.type_name,
                         parameter->specifiers.is_const);
                     Type_ptr parameter_type = parameter_base;
                     if (parameter->declarator) {
@@ -321,7 +341,7 @@ class Semantic_analyzer {
             rhs = rhs->decay();
         }
         if (same_type(lhs, rhs)) return true;
-        if (lhs->is_integer() && rhs->is_integer()) return true;
+        if (lhs->is_arithmetic() && rhs->is_arithmetic()) return true;
         auto lhs_pointer = as_type<Pointer_type>(lhs);
         auto rhs_pointer = as_type<Pointer_type>(rhs);
         if (lhs_pointer && rhs_pointer) {
@@ -355,6 +375,92 @@ class Semantic_analyzer {
                pointer->element->is_complete();
     }
 
+    Type_ptr promote_integer(Type_ptr type) {
+        auto primitive = as_type<Primitive_type>(type);
+        if (!primitive || !primitive->is_integer()) return type;
+        if (primitive->rank < as_type<Primitive_type>(integer_type)->rank) {
+            return integer_type;
+        }
+        return type;
+    }
+
+    Type_ptr common_arithmetic_type(Type_ptr lhs, Type_ptr rhs) {
+        auto lhs_primitive = as_type<Primitive_type>(lhs);
+        auto rhs_primitive = as_type<Primitive_type>(rhs);
+        if (!lhs_primitive || !rhs_primitive ||
+            !lhs->is_arithmetic() ||
+            !rhs->is_arithmetic()) {
+            return nullptr;
+        }
+
+        if (lhs_primitive->is_floating() ||
+            rhs_primitive->is_floating()) {
+            if (lhs_primitive->is_floating() &&
+                rhs_primitive->is_floating()) {
+                return lhs_primitive->rank >= rhs_primitive->rank
+                    ? lhs
+                    : rhs;
+            }
+            return lhs_primitive->is_floating() ? lhs : rhs;
+        }
+
+        lhs = promote_integer(lhs);
+        rhs = promote_integer(rhs);
+        lhs_primitive = as_type<Primitive_type>(lhs);
+        rhs_primitive = as_type<Primitive_type>(rhs);
+        if (lhs_primitive->rank != rhs_primitive->rank) {
+            return lhs_primitive->rank > rhs_primitive->rank
+                ? lhs
+                : rhs;
+        }
+        if (lhs_primitive->is_signed == rhs_primitive->is_signed) {
+            return lhs;
+        }
+        return lhs_primitive->is_signed ? rhs : lhs;
+    }
+
+    Type_ptr number_type(std::string_view raw) {
+        bool floating =
+            raw.contains('.') ||
+            raw.contains('e') ||
+            raw.contains('E');
+        if (floating) {
+            if (!raw.empty() &&
+                (raw.back() == 'f' || raw.back() == 'F')) {
+                return float_type;
+            }
+            if (!raw.empty() &&
+                (raw.back() == 'l' || raw.back() == 'L')) {
+                return long_double_type;
+            }
+            return double_type;
+        }
+
+        bool is_unsigned =
+            raw.contains('u') ||
+            raw.contains('U');
+        int long_count = 0;
+        for (char ch : raw) {
+            long_count += ch == 'l' || ch == 'L';
+        }
+        if (long_count >= 2) {
+            return find_type(
+                is_unsigned
+                    ? "unsigned long long"
+                    : "long long");
+        }
+        if (long_count == 1) {
+            return find_type(
+                is_unsigned
+                    ? "unsigned long"
+                    : "long");
+        }
+        return find_type(
+            is_unsigned
+                ? "unsigned int"
+                : "int");
+    }
+
     Expression_info analyze_expression(const parser::Expression &node) {
         auto found = result.expressions.find(&node);
         if (found != result.expressions.end()) return found->second;
@@ -374,8 +480,10 @@ class Semantic_analyzer {
     Expression_info analyze_expression_node(
         const parser::Primary_expression &node) {
         Expression_info info;
-        if (node.token.type == lexer::token_type::NUMBER ||
-            node.token.type == lexer::token_type::CHAR_CONSTANT) {
+        if (node.token.type == lexer::token_type::NUMBER) {
+            info.type = number_type(node.token.raw);
+        }
+        else if (node.token.type == lexer::token_type::CHAR_CONSTANT) {
             info.type = integer_type;
         }
         else if (node.token.type == lexer::token_type::STRING_CONSTANT) {
@@ -438,10 +546,16 @@ class Semantic_analyzer {
             info.type = operand.type;
         }
         else {
-            if (!operand.type->is_integer()) {
-                error("unary operator requires integer operand");
+            if (!operand.type->is_arithmetic() ||
+                (node.op.raw == "~" &&
+                 !operand.type->is_integer())) {
+                error("unary operator requires arithmetic operand");
             }
-            info.type = integer_type;
+            info.type = node.op.raw == "!"
+                ? integer_type
+                : operand.type->is_integer()
+                    ? promote_integer(operand.type)
+                    : operand.type;
         }
         return info;
     }
@@ -494,9 +608,13 @@ class Semantic_analyzer {
                     error("invalid compound assignment to pointer");
                 }
             }
-            else if (!lhs.type->is_integer() ||
-                     !rhs.type->is_integer()) {
-                error("compound assignment requires integer operands");
+            else if (!lhs.type->is_arithmetic() ||
+                     !rhs.type->is_arithmetic() ||
+                     ((base == "%" || base == "<<" || base == ">>" ||
+                       base == "&" || base == "^" || base == "|") &&
+                      (!lhs.type->is_integer() ||
+                       !rhs.type->is_integer()))) {
+                error("invalid compound assignment operands");
             }
             info.type = lhs.type;
         }
@@ -528,7 +646,7 @@ class Semantic_analyzer {
                 !is_object_pointer(rhs.type)) {
                 error("pointer subtraction requires compatible types");
             }
-            info.type = integer_type;
+            info.type = ptrdiff_type;
         }
         else if (op == "&&" || op == "||") {
             if (!lhs.type->is_scalar() || !rhs.type->is_scalar()) {
@@ -539,8 +657,9 @@ class Semantic_analyzer {
         else if (op == "==" || op == "!=" ||
                  op == "<" || op == "<=" ||
                  op == ">" || op == ">=") {
-            bool integers =
-                lhs.type->is_integer() && rhs.type->is_integer();
+            bool arithmetic =
+                lhs.type->is_arithmetic() &&
+                rhs.type->is_arithmetic();
             bool pointers =
                 as_type<Pointer_type>(lhs.type) &&
                 as_type<Pointer_type>(rhs.type) &&
@@ -550,16 +669,26 @@ class Semantic_analyzer {
                 is_null_pointer_constant(*node.rhs) ||
                 as_type<Pointer_type>(rhs.type) &&
                 is_null_pointer_constant(*node.lhs);
-            if (!integers && !pointers && !null_pointer) {
+            if (!arithmetic && !pointers && !null_pointer) {
                 error("comparison requires compatible scalar operands");
             }
             info.type = integer_type;
         }
         else {
-            if (!lhs.type->is_integer() || !rhs.type->is_integer()) {
-                error("binary operator requires integer operands");
+            bool integer_only =
+                op == "%" || op == "<<" || op == ">>" ||
+                op == "&" || op == "^" || op == "|";
+            if (!lhs.type->is_arithmetic() ||
+                !rhs.type->is_arithmetic() ||
+                (integer_only &&
+                 (!lhs.type->is_integer() ||
+                  !rhs.type->is_integer()))) {
+                error(
+                    "binary operator requires compatible arithmetic operands");
             }
-            info.type = integer_type;
+            info.type = common_arithmetic_type(
+                lhs.type,
+                rhs.type);
         }
         return info;
     }
@@ -647,6 +776,14 @@ class Semantic_analyzer {
         if (!condition.type->is_scalar()) {
             error("conditional expression requires scalar condition");
         }
+        if (true_info.type->is_arithmetic() &&
+            false_info.type->is_arithmetic()) {
+            return Expression_info{
+                common_arithmetic_type(
+                    true_info.type,
+                    false_info.type)
+            };
+        }
         if (as_type<Pointer_type>(true_info.type) &&
             is_null_pointer_constant(*node.false_expression)) {
             return Expression_info{true_info.type};
@@ -674,7 +811,7 @@ class Semantic_analyzer {
     Expression_info analyze_expression_node(
         const parser::Type_query_expression &node) {
         type_query_value(node);
-        return Expression_info{integer_type};
+        return Expression_info{size_type};
     }
 
     Expression_info analyze_expression_node(
@@ -692,7 +829,9 @@ class Semantic_analyzer {
         const parser::Init_declarator &item,
         bool global) {
         current_range = token_range(declaration.type);
-        auto base = base_type(declaration.type, declaration.is_const);
+        auto base = base_type(
+            declaration.type_name,
+            declaration.is_const);
         auto type = declarator_type(base, *item.declarator);
         current_range = token_range(item.declarator->name);
         Symbol::Kind kind = declaration.is_typedef
@@ -876,7 +1015,7 @@ class Semantic_analyzer {
                 error("invalid struct field specifier");
             }
             auto base = base_type(
-                declaration->type,
+                declaration->type_name,
                 declaration->is_const);
             for (auto &item : declaration->declarators) {
                 if (item->initializer) {
@@ -945,7 +1084,7 @@ class Semantic_analyzer {
         if (!function) return;
         current_range = token_range(function->specifiers.type);
         auto base = base_type(
-            function->specifiers.type,
+            function->specifiers.type_name,
             function->specifiers.is_const);
         auto type = declarator_type(base, *function->declarator);
         current_range = token_range(function->declarator->name);
@@ -984,7 +1123,7 @@ class Semantic_analyzer {
             function.declarator->parameters.size() == 1 &&
             !function.declarator->parameters[0]->declarator &&
             is_void(base_type(
-                function.declarator->parameters[0]->specifiers.type,
+                function.declarator->parameters[0]->specifiers.type_name,
                 function.declarator->parameters[0]->specifiers.is_const));
         for (auto &parameter : function.declarator->parameters) {
             if (!parameter->declarator) {
@@ -1016,27 +1155,132 @@ public:
         scopes.clear();
         push_scope();
 
-        void_type = std::make_shared<Primitive_type>(
+        auto add_primitive = [this](
+                                 std::string name,
+                                 Primitive_type::Category category,
+                                 int bits,
+                                 bool is_signed,
+                                 int rank,
+                                 int storage_size = 0,
+                                 int alignment = 0) {
+            auto type = std::make_shared<Primitive_type>(
+                std::move(name),
+                category,
+                bits,
+                is_signed,
+                false,
+                rank,
+                storage_size,
+                alignment);
+            scopes.back().types[type->name()] = type;
+            return Type_ptr(type);
+        };
+
+        void_type = add_primitive(
             "void",
             Primitive_type::Category::VOID_TYPE,
             0,
-            false);
-        character_type = std::make_shared<Primitive_type>(
+            false,
+            0);
+        add_primitive(
+            "_Bool",
+            Primitive_type::Category::INTEGER,
+            1,
+            false,
+            0,
+            1,
+            1);
+        character_type = add_primitive(
             "char",
             Primitive_type::Category::CHARACTER,
             8,
-            true);
-        integer_type = std::make_shared<Primitive_type>(
+            true,
+            1);
+        add_primitive(
+            "signed char",
+            Primitive_type::Category::CHARACTER,
+            8,
+            true,
+            1);
+        add_primitive(
+            "unsigned char",
+            Primitive_type::Category::CHARACTER,
+            8,
+            false,
+            1);
+        add_primitive(
+            "short",
+            Primitive_type::Category::INTEGER,
+            16,
+            true,
+            2);
+        add_primitive(
+            "unsigned short",
+            Primitive_type::Category::INTEGER,
+            16,
+            false,
+            2);
+        integer_type = add_primitive(
             "int",
             Primitive_type::Category::INTEGER,
             32,
-            true);
+            true,
+            3);
+        add_primitive(
+            "unsigned int",
+            Primitive_type::Category::INTEGER,
+            32,
+            false,
+            3);
+        add_primitive(
+            "long",
+            Primitive_type::Category::INTEGER,
+            32,
+            true,
+            4);
+        add_primitive(
+            "unsigned long",
+            Primitive_type::Category::INTEGER,
+            32,
+            false,
+            4);
+        ptrdiff_type = add_primitive(
+            "long long",
+            Primitive_type::Category::INTEGER,
+            64,
+            true,
+            5);
+        size_type = add_primitive(
+            "unsigned long long",
+            Primitive_type::Category::INTEGER,
+            64,
+            false,
+            5);
+        float_type = add_primitive(
+            "float",
+            Primitive_type::Category::FLOATING,
+            32,
+            true,
+            6);
+        double_type = add_primitive(
+            "double",
+            Primitive_type::Category::FLOATING,
+            64,
+            true,
+            7);
+        long_double_type = add_primitive(
+            "long double",
+            Primitive_type::Category::FLOATING,
+            80,
+            true,
+            8,
+            16,
+            16);
         result.void_type = void_type;
         result.character_type = character_type;
         result.integer_type = integer_type;
-        scopes.back().types[void_type->name()] = void_type;
-        scopes.back().types[character_type->name()] = character_type;
-        scopes.back().types[integer_type->name()] = integer_type;
+        result.size_type = size_type;
+        result.ptrdiff_type = ptrdiff_type;
 
         for (auto &external : program.external_declarations) {
             predeclare_global(*external);

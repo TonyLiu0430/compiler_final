@@ -22,9 +22,7 @@ public:
         const Type_ptr &type) const {
         if (auto primitive = as_type<Primitive_type>(type)) {
             if (primitive->is_void()) return std::nullopt;
-            return std::max<long long>(
-                1,
-                primitive->bit_width / 8);
+            return primitive->alignment;
         }
         if (as_type<Pointer_type>(type)) {
             return pointer_alignment;
@@ -49,9 +47,7 @@ public:
         const Type_ptr &type) const {
         if (auto primitive = as_type<Primitive_type>(type)) {
             if (primitive->is_void()) return std::nullopt;
-            return std::max<long long>(
-                1,
-                primitive->bit_width / 8);
+            return primitive->storage_size;
         }
         if (as_type<Pointer_type>(type)) {
             return pointer_size;

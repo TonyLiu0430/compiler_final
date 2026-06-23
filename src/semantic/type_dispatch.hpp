@@ -9,6 +9,11 @@
 
 namespace c9ay::semantic::reflect {
 
+// TODO(dispatch-performance):
+// Keep this in sync with parser/reflect_dispatch.hpp. If profiling justifies
+// it, share one reflection-generated fixed flat RTTI table implementation.
+// Avoid std::unordered_map and avoid adding type IDs/functions to every type.
+
 consteval auto type_nodes() {
     std::vector<std::meta::info> result;
     for (auto member : std::meta::members_of(

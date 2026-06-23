@@ -9,10 +9,19 @@ inline llvm::Value *LLVM_codegen::expression(
 
 inline llvm::Value *LLVM_codegen::expression_node(
     const parser::Primary_expression &node) {
-    if (node.token.type == lexer::token_type::NUMBER ||
-        node.token.type == lexer::token_type::CHAR_CONSTANT) {
+    if (node.token.type == lexer::token_type::NUMBER) {
+        auto type = semantic_result.info(node).type;
+        if (type->is_floating()) {
+            return floating(type, node.token.raw);
+        }
         auto value = semantic::Constant_evaluator::evaluate(node);
         if (!value) unsupported("numeric literal");
+        return integer(type, value->value);
+    }
+
+    if (node.token.type == lexer::token_type::CHAR_CONSTANT) {
+        auto value = semantic::Constant_evaluator::evaluate(node);
+        if (!value) unsupported("character literal");
         return integer(value->value);
     }
 
@@ -82,15 +91,25 @@ inline llvm::Value *LLVM_codegen::expression_node(
                 "pointer.increment");
         }
         else {
-            value = node.op.raw == "++"
-                ? builder.CreateAdd(
-                      as_integer(old),
-                      integer(1),
-                      "increment")
-                : builder.CreateSub(
-                      as_integer(old),
-                      integer(1),
-                      "decrement");
+            if (type->is_floating()) {
+                auto one = llvm::ConstantFP::get(
+                    type_of(type),
+                    1.0);
+                value = node.op.raw == "++"
+                    ? builder.CreateFAdd(old, one, "increment")
+                    : builder.CreateFSub(old, one, "decrement");
+            }
+            else {
+                value = node.op.raw == "++"
+                    ? builder.CreateAdd(
+                          old,
+                          integer(type, 1),
+                          "increment")
+                    : builder.CreateSub(
+                          old,
+                          integer(type, 1),
+                          "decrement");
+            }
             value = convert(value, type);
         }
         builder.CreateStore(value, address);
@@ -116,10 +135,12 @@ inline llvm::Value *LLVM_codegen::expression_node(
             "dereference");
     }
 
-    auto operand = as_integer(expression(*node.operand));
+    auto operand = expression(*node.operand);
     if (node.op.raw == "+") return operand;
     if (node.op.raw == "-") {
-        return builder.CreateNeg(operand, "negative");
+        return operand->getType()->isFloatingPointTy()
+            ? builder.CreateFNeg(operand, "negative")
+            : builder.CreateNeg(operand, "negative");
     }
     if (node.op.raw == "!") {
         return as_integer(builder.CreateNot(
@@ -127,7 +148,9 @@ inline llvm::Value *LLVM_codegen::expression_node(
             "logical_not"));
     }
     if (node.op.raw == "~") {
-        return builder.CreateNot(operand, "bit_not");
+        return builder.CreateNot(
+            operand,
+            "bit_not");
     }
     unsupported("prefix operator");
 }
@@ -150,15 +173,25 @@ inline llvm::Value *LLVM_codegen::expression_node(
             "pointer.increment");
     }
     else {
-        value = node.op.raw == "++"
-            ? builder.CreateAdd(
-                  as_integer(old),
-                  integer(1),
-                  "increment")
-            : builder.CreateSub(
-                  as_integer(old),
-                  integer(1),
-                  "decrement");
+        if (type->is_floating()) {
+            auto one = llvm::ConstantFP::get(
+                type_of(type),
+                1.0);
+            value = node.op.raw == "++"
+                ? builder.CreateFAdd(old, one, "increment")
+                : builder.CreateFSub(old, one, "decrement");
+        }
+        else {
+            value = node.op.raw == "++"
+                ? builder.CreateAdd(
+                      old,
+                      integer(type, 1),
+                      "increment")
+                : builder.CreateSub(
+                      old,
+                      integer(type, 1),
+                      "decrement");
+        }
         value = convert(value, type);
     }
     builder.CreateStore(value, address);
@@ -175,9 +208,10 @@ inline llvm::Value *LLVM_codegen::expression_node(
         op == "&=" || op == "^=" || op == "|=") {
         auto address = lvalue(*node.lhs);
         auto lhs_type = semantic_result.info(*node.lhs).type;
+        auto rhs_type = semantic_result.info(*node.rhs).type;
         auto rhs = expression(*node.rhs);
         if (op == "=") {
-            rhs = convert(rhs, lhs_type);
+            rhs = convert(rhs, lhs_type, rhs_type);
         }
         else {
             auto lhs = expression(*node.lhs);
@@ -185,7 +219,7 @@ inline llvm::Value *LLVM_codegen::expression_node(
             if (auto pointer =
                     semantic::as_type<semantic::Pointer_type>(lhs_type);
                 (base == "+" || base == "-") && pointer) {
-                auto index = as_integer(rhs);
+                auto index = as_index(rhs, rhs_type);
                 if (base == "-") {
                     index = builder.CreateNeg(index);
                 }
@@ -195,21 +229,46 @@ inline llvm::Value *LLVM_codegen::expression_node(
                     index);
             }
             else {
-                lhs = as_integer(lhs);
-                rhs = as_integer(rhs);
-                if (base == "+") rhs = builder.CreateAdd(lhs, rhs);
-                else if (base == "-") rhs = builder.CreateSub(lhs, rhs);
-                else if (base == "*") rhs = builder.CreateMul(lhs, rhs);
-                else if (base == "/") rhs = builder.CreateSDiv(lhs, rhs);
-                else if (base == "%") rhs = builder.CreateSRem(lhs, rhs);
-                else if (base == "<<") rhs = builder.CreateShl(lhs, rhs);
-                else if (base == ">>") rhs = builder.CreateAShr(lhs, rhs);
-                else if (base == "&") rhs = builder.CreateAnd(lhs, rhs);
-                else if (base == "^") rhs = builder.CreateXor(lhs, rhs);
-                else if (base == "|") rhs = builder.CreateOr(lhs, rhs);
+                auto operation_type =
+                    common_arithmetic_type(lhs_type, rhs_type);
+                lhs = convert(lhs, operation_type, lhs_type);
+                rhs = convert(rhs, operation_type, rhs_type);
+                if (operation_type->is_floating()) {
+                    if (base == "+") rhs = builder.CreateFAdd(lhs, rhs);
+                    else if (base == "-") rhs = builder.CreateFSub(lhs, rhs);
+                    else if (base == "*") rhs = builder.CreateFMul(lhs, rhs);
+                    else if (base == "/") rhs = builder.CreateFDiv(lhs, rhs);
+                }
+                else {
+                    auto primitive =
+                        semantic::as_type<semantic::Primitive_type>(
+                            operation_type);
+                    if (base == "+") rhs = builder.CreateAdd(lhs, rhs);
+                    else if (base == "-") rhs = builder.CreateSub(lhs, rhs);
+                    else if (base == "*") rhs = builder.CreateMul(lhs, rhs);
+                    else if (base == "/") {
+                        rhs = primitive->is_signed
+                            ? builder.CreateSDiv(lhs, rhs)
+                            : builder.CreateUDiv(lhs, rhs);
+                    }
+                    else if (base == "%") {
+                        rhs = primitive->is_signed
+                            ? builder.CreateSRem(lhs, rhs)
+                            : builder.CreateURem(lhs, rhs);
+                    }
+                    else if (base == "<<") rhs = builder.CreateShl(lhs, rhs);
+                    else if (base == ">>") {
+                        rhs = primitive->is_signed
+                            ? builder.CreateAShr(lhs, rhs)
+                            : builder.CreateLShr(lhs, rhs);
+                    }
+                    else if (base == "&") rhs = builder.CreateAnd(lhs, rhs);
+                    else if (base == "^") rhs = builder.CreateXor(lhs, rhs);
+                    else if (base == "|") rhs = builder.CreateOr(lhs, rhs);
+                }
             }
         }
-        rhs = convert(rhs, lhs_type);
+        rhs = convert(rhs, lhs_type, rhs_type);
         builder.CreateStore(rhs, address);
         return rhs;
     }
@@ -266,7 +325,9 @@ inline llvm::Value *LLVM_codegen::expression_node(
         lhs_pointer &&
         rhs_type->is_integer()) {
         auto pointer = expression(*node.lhs);
-        auto index = as_integer(expression(*node.rhs));
+        auto index = as_index(
+            expression(*node.rhs),
+            rhs_type);
         if (op == "-") {
             index = builder.CreateNeg(index, "negative.index");
         }
@@ -283,14 +344,17 @@ inline llvm::Value *LLVM_codegen::expression_node(
         return builder.CreateGEP(
             type_of(rhs_pointer->element),
             expression(*node.rhs),
-            as_integer(expression(*node.lhs)),
+            as_index(
+                expression(*node.lhs),
+                lhs_type),
             "pointer.offset");
     }
 
     if (op == "-" &&
         lhs_pointer &&
         rhs_pointer) {
-        auto integer_type = llvm::Type::getInt64Ty(context);
+        auto integer_type =
+            type_of(semantic_result.ptrdiff_type);
         auto lhs = builder.CreatePtrToInt(
             expression(*node.lhs),
             integer_type);
@@ -306,7 +370,7 @@ inline llvm::Value *LLVM_codegen::expression_node(
             "pointer.distance");
         return builder.CreateIntCast(
             distance,
-            type_of(semantic_result.integer_type),
+            type_of(semantic_result.ptrdiff_type),
             true);
     }
 
@@ -334,24 +398,81 @@ inline llvm::Value *LLVM_codegen::expression_node(
         return as_integer(comparison);
     }
 
-    auto lhs = as_integer(expression(*node.lhs));
-    auto rhs = as_integer(expression(*node.rhs));
-    if (op == "+") return builder.CreateAdd(lhs, rhs, "add");
-    if (op == "-") return builder.CreateSub(lhs, rhs, "subtract");
-    if (op == "*") return builder.CreateMul(lhs, rhs, "multiply");
-    if (op == "/") return builder.CreateSDiv(lhs, rhs, "divide");
-    if (op == "%") return builder.CreateSRem(lhs, rhs, "remainder");
-    if (op == "<<") return builder.CreateShl(lhs, rhs, "shift_left");
-    if (op == ">>") return builder.CreateAShr(lhs, rhs, "shift_right");
-    if (op == "&") return builder.CreateAnd(lhs, rhs, "bit_and");
-    if (op == "^") return builder.CreateXor(lhs, rhs, "bit_xor");
-    if (op == "|") return builder.CreateOr(lhs, rhs, "bit_or");
-    if (op == "==") return as_integer(builder.CreateICmpEQ(lhs, rhs));
-    if (op == "!=") return as_integer(builder.CreateICmpNE(lhs, rhs));
-    if (op == "<") return as_integer(builder.CreateICmpSLT(lhs, rhs));
-    if (op == "<=") return as_integer(builder.CreateICmpSLE(lhs, rhs));
-    if (op == ">") return as_integer(builder.CreateICmpSGT(lhs, rhs));
-    if (op == ">=") return as_integer(builder.CreateICmpSGE(lhs, rhs));
+    auto operation_type =
+        common_arithmetic_type(lhs_type, rhs_type);
+    auto lhs = convert(
+        expression(*node.lhs),
+        operation_type,
+        lhs_type);
+    auto rhs = convert(
+        expression(*node.rhs),
+        operation_type,
+        rhs_type);
+    if (operation_type->is_floating()) {
+        if (op == "+") return builder.CreateFAdd(lhs, rhs, "add");
+        if (op == "-") return builder.CreateFSub(lhs, rhs, "subtract");
+        if (op == "*") return builder.CreateFMul(lhs, rhs, "multiply");
+        if (op == "/") return builder.CreateFDiv(lhs, rhs, "divide");
+        if (op == "==") return as_integer(builder.CreateFCmpOEQ(lhs, rhs));
+        if (op == "!=") return as_integer(builder.CreateFCmpUNE(lhs, rhs));
+        if (op == "<") return as_integer(builder.CreateFCmpOLT(lhs, rhs));
+        if (op == "<=") return as_integer(builder.CreateFCmpOLE(lhs, rhs));
+        if (op == ">") return as_integer(builder.CreateFCmpOGT(lhs, rhs));
+        if (op == ">=") return as_integer(builder.CreateFCmpOGE(lhs, rhs));
+    }
+    else {
+        auto primitive =
+            semantic::as_type<semantic::Primitive_type>(
+                operation_type);
+        if (op == "+") return builder.CreateAdd(lhs, rhs, "add");
+        if (op == "-") return builder.CreateSub(lhs, rhs, "subtract");
+        if (op == "*") return builder.CreateMul(lhs, rhs, "multiply");
+        if (op == "/") {
+            return primitive->is_signed
+                ? builder.CreateSDiv(lhs, rhs, "divide")
+                : builder.CreateUDiv(lhs, rhs, "divide");
+        }
+        if (op == "%") {
+            return primitive->is_signed
+                ? builder.CreateSRem(lhs, rhs, "remainder")
+                : builder.CreateURem(lhs, rhs, "remainder");
+        }
+        if (op == "<<") return builder.CreateShl(lhs, rhs, "shift_left");
+        if (op == ">>") {
+            return primitive->is_signed
+                ? builder.CreateAShr(lhs, rhs, "shift_right")
+                : builder.CreateLShr(lhs, rhs, "shift_right");
+        }
+        if (op == "&") return builder.CreateAnd(lhs, rhs, "bit_and");
+        if (op == "^") return builder.CreateXor(lhs, rhs, "bit_xor");
+        if (op == "|") return builder.CreateOr(lhs, rhs, "bit_or");
+        if (op == "==") return as_integer(builder.CreateICmpEQ(lhs, rhs));
+        if (op == "!=") return as_integer(builder.CreateICmpNE(lhs, rhs));
+        if (op == "<") {
+            return as_integer(
+                primitive->is_signed
+                    ? builder.CreateICmpSLT(lhs, rhs)
+                    : builder.CreateICmpULT(lhs, rhs));
+        }
+        if (op == "<=") {
+            return as_integer(
+                primitive->is_signed
+                    ? builder.CreateICmpSLE(lhs, rhs)
+                    : builder.CreateICmpULE(lhs, rhs));
+        }
+        if (op == ">") {
+            return as_integer(
+                primitive->is_signed
+                    ? builder.CreateICmpSGT(lhs, rhs)
+                    : builder.CreateICmpUGT(lhs, rhs));
+        }
+        if (op == ">=") {
+            return as_integer(
+                primitive->is_signed
+                    ? builder.CreateICmpSGE(lhs, rhs)
+                    : builder.CreateICmpUGE(lhs, rhs));
+        }
+    }
     unsupported("binary operator");
 }
 
@@ -375,7 +496,8 @@ inline llvm::Value *LLVM_codegen::expression_node(
         auto value = expression(*argument);
         value = convert(
             value,
-            semantic_function->parameters[argument_index++]);
+            semantic_function->parameters[argument_index++],
+            semantic_result.info(*argument).type);
         arguments.push_back(value);
     }
     return builder.CreateCall(
@@ -455,7 +577,10 @@ inline llvm::Value *LLVM_codegen::expression_node(
     auto result_type = semantic_result.info(node).type;
     auto true_value = expression(*node.true_expression);
     if (!semantic::is_void(result_type)) {
-        true_value = convert(true_value, result_type);
+        true_value = convert(
+            true_value,
+            result_type,
+            semantic_result.info(*node.true_expression).type);
     }
     true_block = builder.GetInsertBlock();
     builder.CreateBr(merge_block);
@@ -463,7 +588,10 @@ inline llvm::Value *LLVM_codegen::expression_node(
     builder.SetInsertPoint(false_block);
     auto false_value = expression(*node.false_expression);
     if (!semantic::is_void(result_type)) {
-        false_value = convert(false_value, result_type);
+        false_value = convert(
+            false_value,
+            result_type,
+            semantic_result.info(*node.false_expression).type);
     }
     false_block = builder.GetInsertBlock();
     builder.CreateBr(merge_block);
@@ -488,14 +616,19 @@ inline llvm::Value *LLVM_codegen::expression_node(
     if (semantic::is_void(target)) {
         return nullptr;
     }
-    return convert(value, target);
+    return convert(
+        value,
+        target,
+        semantic_result.info(*node.operand).type);
 }
 
 inline llvm::Value *LLVM_codegen::expression_node(
     const parser::Type_query_expression &node) {
     auto value = semantic_result.constant(node);
     if (!value) unsupported("type query constant");
-    return integer(*value);
+    return integer(
+        semantic_result.info(node).type,
+        *value);
 }
 
 inline llvm::Value *LLVM_codegen::expression_node(

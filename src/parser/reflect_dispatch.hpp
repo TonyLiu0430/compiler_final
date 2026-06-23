@@ -9,6 +9,17 @@
 
 namespace c9ay::parser::reflect {
 
+// TODO(dispatch-performance):
+// Benchmark this dynamic_cast chain before replacing it. The candidate design
+// is a reflection-generated fixed flat hash table keyed by typeid(node):
+//   - std::array entries containing const std::type_info * and a trampoline;
+//   - capacity chosen from the reflected derived-type count;
+//   - one-time open-addressing initialization using type_info::hash_code();
+//   - no unordered_map, heap allocation, CRTP, or Node_kind field.
+// GCC 16 permits constexpr &typeid(T) and type_info equality, but hash_code()
+// is runtime-only. Do not implement until dispatch is measured as a bottleneck;
+// template/reflection instantiation may cost more build time than it saves.
+
 template <class Base>
 consteval auto derived_types() {
     std::vector<std::meta::info> result;

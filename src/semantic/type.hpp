@@ -25,8 +25,16 @@ struct Type {
         return false;
     }
 
+    virtual bool is_floating() const {
+        return false;
+    }
+
+    virtual bool is_arithmetic() const {
+        return is_integer() || is_floating();
+    }
+
     virtual bool is_scalar() const {
-        return is_integer();
+        return is_arithmetic();
     }
 
     virtual bool is_complete() const = 0;
@@ -39,25 +47,41 @@ struct Primitive_type : Type {
     enum class Category {
         VOID_TYPE,
         INTEGER,
-        CHARACTER
+        CHARACTER,
+        FLOATING
     };
 
     std::string type_name;
     Category category;
     int bit_width;
     bool is_signed;
+    int rank;
+    int storage_size;
+    int alignment;
 
     Primitive_type(
         std::string _type_name,
         Category _category,
         int _bit_width,
         bool _is_signed,
-        bool _is_const = false)
+        bool _is_const = false,
+        int _rank = 0,
+        int _storage_size = 0,
+        int _alignment = 0)
         : Type(_is_const),
           type_name(std::move(_type_name)),
           category(_category),
           bit_width(_bit_width),
-          is_signed(_is_signed) {}
+          is_signed(_is_signed),
+          rank(_rank),
+          storage_size(
+              _storage_size
+                  ? _storage_size
+                  : (_bit_width + 7) / 8),
+          alignment(
+              _alignment
+                  ? _alignment
+                  : storage_size) {}
 
     bool is_integer() const override {
         return category == Category::INTEGER ||
@@ -66,6 +90,10 @@ struct Primitive_type : Type {
 
     bool is_character() const {
         return category == Category::CHARACTER;
+    }
+
+    bool is_floating() const override {
+        return category == Category::FLOATING;
     }
 
     bool is_void() const {

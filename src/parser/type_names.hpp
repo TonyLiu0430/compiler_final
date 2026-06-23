@@ -5,9 +5,16 @@
 #include <unordered_set>
 #include <vector>
 
+#include "base/string_hash.hpp"
+
 namespace c9ay::parser::type_names {
 
-static thread_local std::vector<std::unordered_set<std::string>> scopes;
+using Name_set = std::unordered_set<
+    std::string,
+    Transparent_string_hash,
+    Transparent_string_equal>;
+
+static thread_local std::vector<Name_set> scopes;
 
 inline void reset() {
     scopes.clear();
@@ -24,13 +31,8 @@ inline void pop_scope() {
 }
 
 inline bool contains(std::string_view name) {
-    if (name == "void" ||
-        name == "char" ||
-        name == "int") {
-        return true;
-    }
     for (int i = static_cast<int>(scopes.size()) - 1; i >= 0; i--) {
-        if (scopes[i].contains(std::string(name))) return true;
+        if (scopes[i].contains(name)) return true;
     }
     return false;
 }
