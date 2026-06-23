@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "base/literal.hpp"
+#include "base/printf_format.hpp"
 #include "base/string_hash.hpp"
 #include "diagnostic/diagnostic.hpp"
 #include "parser/parser.h"
@@ -695,6 +696,66 @@ class Semantic_analyzer {
 
     Expression_info analyze_expression_node(
         const parser::Call_expression &node) {
+        auto builtin_name =
+            dynamic_cast<const parser::Primary_expression *>(
+                node.callee.get());
+        if (builtin_name &&
+            builtin_name->token.type ==
+                lexer::token_type::IDENTIFIER &&
+            builtin_name->token.raw == "printf") {
+            if (node.arguments.empty()) {
+                error("printf requires a format string");
+            }
+            auto format =
+                dynamic_cast<const parser::Primary_expression *>(
+                    node.arguments[0].get());
+            if (!format ||
+                format->token.type !=
+                    lexer::token_type::STRING_CONSTANT) {
+                error("printf format must be a string literal");
+            }
+            auto decoded =
+                literal::decode_string(format->token.raw);
+            if (!decoded) error("invalid printf format string");
+            std::string format_error;
+            auto parsed = builtin::parse_printf_format(
+                *decoded,
+                &format_error);
+            if (!parsed) error(format_error);
+            if (static_cast<int>(node.arguments.size()) !=
+                parsed->arguments + 1) {
+                error("printf argument count does not match format");
+            }
+
+            analyze_expression(*node.arguments[0]);
+            int argument_index = 1;
+            for (auto &part : parsed->parts) {
+                if (part.kind ==
+                    builtin::Printf_part_kind::TEXT) {
+                    continue;
+                }
+                auto argument = analyze_expression(
+                    *node.arguments[argument_index++]);
+                if (part.kind ==
+                        builtin::Printf_part_kind::STRING) {
+                    auto type = argument.type;
+                    if (as_type<Array_type>(type)) {
+                        type = type->decay();
+                    }
+                    auto pointer = as_type<Pointer_type>(type);
+                    if (!pointer ||
+                        !is_character(pointer->element)) {
+                        error("printf %s requires a character pointer");
+                    }
+                }
+                else if (!argument.type->is_integer()) {
+                    error(
+                        "printf integer format requires integer argument");
+                }
+            }
+            return Expression_info{integer_type};
+        }
+
         auto callee = analyze_expression(*node.callee);
         Type_ptr function_type = callee.type;
         if (auto pointer = as_type<Pointer_type>(function_type)) {

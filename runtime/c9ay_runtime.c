@@ -85,3 +85,46 @@ void printIntLine(int value) {
     printInt(value);
     writeChar('\n');
 }
+
+void printLongLong(long long value) {
+    char digits[20];
+    int count = 0;
+    int negative = value < 0;
+
+    if (!negative) {
+        value = -value;
+    }
+
+    do {
+        int digit = -(value % 10);
+        digits[count] = '0' + digit;
+        count++;
+        value = value / 10;
+    } while (value);
+
+    if (negative) {
+        writeChar('-');
+    }
+
+    while (count > 0) {
+        count--;
+        writeChar(digits[count]);
+    }
+}
+
+void printUnsignedLongLong(unsigned long long value) {
+    char digits[20];
+    int count = 0;
+
+    do {
+        int digit = value % 10;
+        digits[count] = '0' + digit;
+        count++;
+        value = value / 10;
+    } while (value);
+
+    while (count > 0) {
+        count--;
+        writeChar(digits[count]);
+    }
+}

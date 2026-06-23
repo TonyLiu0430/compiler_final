@@ -31,6 +31,7 @@
 #include <llvm/Transforms/Utils.h>
 
 #include "base/literal.hpp"
+#include "base/printf_format.hpp"
 #include "base/string_hash.hpp"
 #include "codegen/llvm_target.hpp"
 #include "codegen/optimization.hpp"
@@ -366,6 +367,110 @@ class LLVM_codegen {
             data->getType(),
             global,
             indices);
+    }
+
+    llvm::FunctionCallee runtime_function(
+        std::string_view name,
+        llvm::Type *return_type,
+        std::vector<llvm::Type *> parameters) {
+        return module->getOrInsertFunction(
+            llvm::StringRef(name.data(), name.size()),
+            llvm::FunctionType::get(
+                return_type,
+                parameters,
+                false));
+    }
+
+    llvm::Value *builtin_printf(
+        const parser::Call_expression &node) {
+        auto format =
+            static_cast<const parser::Primary_expression *>(
+                node.arguments[0].get());
+        auto decoded =
+            literal::decode_string(format->token.raw);
+        if (!decoded) unsupported("printf format string");
+        auto parsed = builtin::parse_printf_format(*decoded);
+        if (!parsed) unsupported("printf format");
+
+        auto void_type = llvm::Type::getVoidTy(context);
+        auto pointer_type = llvm::PointerType::get(context, 0);
+        auto write_text = runtime_function(
+            "writeText",
+            void_type,
+            {pointer_type});
+        auto write_char = runtime_function(
+            "writeChar",
+            void_type,
+            {type_of(semantic_result.character_type)});
+        auto print_signed = runtime_function(
+            "printLongLong",
+            void_type,
+            {type_of(semantic_result.ptrdiff_type)});
+        auto print_unsigned = runtime_function(
+            "printUnsignedLongLong",
+            void_type,
+            {type_of(semantic_result.size_type)});
+
+        int argument_index = 1;
+        for (auto &part : parsed->parts) {
+            if (part.kind == builtin::Printf_part_kind::TEXT) {
+                if (part.text.empty()) continue;
+                std::string raw = "\"";
+                for (char ch : part.text) {
+                    if (ch == '\n') raw += "\\n";
+                    else if (ch == '\t') raw += "\\t";
+                    else if (ch == '\f') raw += "\\f";
+                    else if (ch == '"' || ch == '\\') {
+                        raw.push_back('\\');
+                        raw.push_back(ch);
+                    }
+                    else {
+                        raw.push_back(ch);
+                    }
+                }
+                raw.push_back('"');
+                builder.CreateCall(
+                    write_text,
+                    {string_pointer(raw)});
+                continue;
+            }
+
+            auto &argument = *node.arguments[argument_index++];
+            auto value = expression(argument);
+            auto source = semantic_result.info(argument).type;
+            if (part.kind == builtin::Printf_part_kind::STRING) {
+                builder.CreateCall(write_text, {value});
+            }
+            else if (
+                part.kind ==
+                builtin::Printf_part_kind::CHARACTER) {
+                builder.CreateCall(
+                    write_char,
+                    {convert(
+                        value,
+                        semantic_result.character_type,
+                        source)});
+            }
+            else if (
+                part.kind ==
+                builtin::Printf_part_kind::SIGNED_INTEGER) {
+                builder.CreateCall(
+                    print_signed,
+                    {convert(
+                        value,
+                        semantic_result.ptrdiff_type,
+                        source)});
+            }
+            else {
+                builder.CreateCall(
+                    print_unsigned,
+                    {convert(
+                        value,
+                        semantic_result.size_type,
+                        source)});
+            }
+        }
+        return integer(0);
     }
 
     llvm::Value *as_condition(llvm::Value *value) {

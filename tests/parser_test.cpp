@@ -1903,3 +1903,85 @@ TEST_CASE("c9ay runtime prints observable console output") {
     std::filesystem::remove(output);
     std::filesystem::remove(error);
 }
+
+TEST_CASE("builtin printf expands literal format at compile time") {
+    std::string source = R"(
+        int main() {
+            char *text = "value";
+            unsigned long long maximum =
+                18446744073709551615ULL;
+            printf(
+                "%s: %d %u %c %%\n",
+                text,
+                -42,
+                maximum,
+                '!');
+            return 0;
+        }
+    )";
+
+    Reader reader("builtin-printf.c", source);
+    lexer::LexerMgr mgr(reader);
+    auto lexer = mgr.get_lexer();
+    auto program = parser::Program::match(lexer);
+
+    auto directory = std::filesystem::temp_directory_path();
+    auto executable = directory / "c9ay-builtin-printf.exe";
+    auto output = directory / "c9ay-builtin-printf.txt";
+    std::filesystem::remove(executable);
+    std::filesystem::remove(output);
+
+    codegen::LLVM_codegen codegen("builtin_printf");
+    codegen.generate(*program);
+    codegen.emit_executable(executable);
+
+    std::string program_path = executable.string();
+    std::string output_path = output.string();
+    std::vector<llvm::StringRef> arguments = {
+        program_path
+    };
+    std::vector<std::optional<llvm::StringRef>> redirects = {
+        std::nullopt,
+        output_path,
+        std::nullopt
+    };
+    int result = llvm::sys::ExecuteAndWait(
+        program_path,
+        arguments,
+        std::nullopt,
+        redirects);
+
+    CHECK(result == 0);
+    std::ifstream output_file(output, std::ios::binary);
+    std::string text{
+        std::istreambuf_iterator<char>(output_file),
+        std::istreambuf_iterator<char>()};
+    CHECK(
+        text ==
+        "value: -42 18446744073709551615 ! %\n");
+
+    output_file.close();
+    std::filesystem::remove(executable);
+    std::filesystem::remove(output);
+}
+
+TEST_CASE("builtin printf rejects dynamic format strings") {
+    std::string source = R"(
+        int main() {
+            char *format = "%d";
+            printf(format, 42);
+            return 0;
+        }
+    )";
+
+    Reader reader("dynamic-printf.c", source);
+    lexer::LexerMgr mgr(reader);
+    auto lexer = mgr.get_lexer();
+    auto program = parser::Program::match(lexer);
+
+    semantic::Semantic_analyzer analyzer;
+    CHECK_THROWS_WITH_AS(
+        analyzer.analyze(*program),
+        "compile error: printf format must be a string literal",
+        semantic::Compile_error);
+}

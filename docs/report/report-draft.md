@@ -21,10 +21,10 @@
 
 專案同時包含成功編譯、預期編譯失敗與 panic mode recovery 三類測試。目前共有：
 
-- 21 個預期成功的 C 程式測試；
-- 32 個預期失敗的 C 程式測試；
+- 22 個預期成功的 C 程式測試；
+- 33 個預期失敗的 C 程式測試；
 - 8 個 panic mode recovery 測試；
-- 66 個 doctest 測試案例，共 665 個 assertions。
+- 68 個 doctest 測試案例，共 673 個 assertions。
 
 在目前版本中，全部 doctest 測試皆通過。
 
@@ -220,6 +220,11 @@ Expression 使用 Pratt Parser，支援：
 - `?:` conditional expression；
 - comma operator；
 - short-circuit `&&`、`||`。
+
+另外提供 compiler builtin `printf`。它不使用 C varargs ABI，而要求
+format 為 string literal，並在編譯期展開為 runtime 輸出函式呼叫。目前
+支援 `%%`、`%s`、`%c`、`%d`、`%i`、`%u`、`%ld`、`%lu`、
+`%lld` 與 `%llu`。
 
 ### 4.6 語意分析
 
@@ -737,8 +742,8 @@ Built target compiler_tests
 目前測試結果：
 
 ```text
-[doctest] test cases:  66 |  66 passed | 0 failed | 0 skipped
-[doctest] assertions: 665 | 665 passed | 0 failed
+[doctest] test cases:  68 |  68 passed | 0 failed | 0 skipped
+[doctest] assertions: 673 | 673 passed | 0 failed
 [doctest] Status: SUCCESS!
 ```
 
@@ -839,7 +844,7 @@ DLL Name: KERNEL32.dll
 
 ### 10.1 Compile Success
 
-`test/compile_success` 目前包含 21 個案例，涵蓋：
+`test/compile_success` 目前包含 22 個案例，涵蓋：
 
 - return；
 - integer arithmetic；
@@ -862,10 +867,11 @@ DLL Name: KERNEL32.dll
 - integer types；
 - floating types；
 - pointer difference。
+- builtin printf。
 
 ### 10.2 Compile Failure
 
-`test/compile_failure` 目前包含 32 個案例，涵蓋：
+`test/compile_failure` 目前包含 33 個案例，涵蓋：
 
 - unknown type；
 - undeclared identifier；
@@ -886,6 +892,7 @@ DLL Name: KERNEL32.dll
 - invalid subscript；
 - float modulo；
 - invalid type combination。
+- dynamic printf format。
 
 每個 fixture 以註解標記預期錯誤數與關鍵訊息，例如：
 
@@ -916,6 +923,8 @@ DLL Name: KERNEL32.dll
 8. linker 目前固定連結 `kernel32`，尚未提供命令列指定其他 Windows system library。
 9. preprocessor 為本專案子集，並非完整符合所有 ISO C preprocessing 規則。
 10. C++26 reflection dispatch 仍需 benchmark，再決定是否由 dynamic-cast chain 改為 array search。
+11. builtin `printf` 只接受 literal format，不支援 width、precision、`%f`
+    或動態 format；目前回傳值固定為 `0`。
 
 ---
 

@@ -138,7 +138,24 @@ void print(char *text);
 void printLine(char *text);
 void printInt(int value);
 void printIntLine(int value);
+void printLongLong(long long value);
+void printUnsignedLongLong(unsigned long long value);
 ```
+
+編譯器也提供 builtin `printf`：
+
+```c
+printf("%s: %d %u %c %%\n", text, value, unsigned_value, ch);
+```
+
+支援：
+
+```text
+%% %s %c %d %i %u %ld %lu %lld %llu
+```
+
+Format 必須是 string literal。它會在編譯期展開，不使用真正的 varargs。
+目前不支援 width、precision、`%f` 或動態 format，且回傳值固定為 `0`。
 
 範例：
 

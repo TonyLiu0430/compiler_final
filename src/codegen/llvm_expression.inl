@@ -478,6 +478,16 @@ inline llvm::Value *LLVM_codegen::expression_node(
 
 inline llvm::Value *LLVM_codegen::expression_node(
     const parser::Call_expression &node) {
+    auto builtin_name =
+        dynamic_cast<const parser::Primary_expression *>(
+            node.callee.get());
+    if (builtin_name &&
+        builtin_name->token.type ==
+            lexer::token_type::IDENTIFIER &&
+        builtin_name->token.raw == "printf") {
+        return builtin_printf(node);
+    }
+
     auto callee_type = semantic_result.info(*node.callee).type;
     if (auto pointer =
             semantic::as_type<semantic::Pointer_type>(callee_type)) {
