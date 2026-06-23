@@ -54,7 +54,9 @@ type-qualifier =
 type-specifier =
     typedef-name
   | "void"
+  | "bool"
   | "_Bool"
+  | "struct", IDENTIFIER
   | "char"
   | "signed", [ "char" | integer-type ]
   | "unsigned", [ "char" | integer-type ]

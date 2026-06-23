@@ -1,5 +1,5 @@
 int main() {
-    _Bool boolean = 1;
+    bool boolean = 1;
     signed char signed_byte = -1;
     unsigned char byte = 2;
     short small = 3;

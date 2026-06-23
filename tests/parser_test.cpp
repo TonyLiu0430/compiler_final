@@ -66,6 +66,14 @@ TEST_CASE("operator trie recognizes every C symbolic operator") {
 
         CHECK(token.type == lexer::token_type::OPERATOR);
         CHECK(token.raw == op);
+        if (op.size() == 1) {
+            CHECK(token.match<lexer::token_type::OPERATOR>(
+                op.front()));
+        }
+        else {
+            CHECK_FALSE(token.match<lexer::token_type::OPERATOR>(
+                op.front()));
+        }
     }
 }
 

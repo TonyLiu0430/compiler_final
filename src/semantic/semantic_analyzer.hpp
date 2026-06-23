@@ -1180,14 +1180,15 @@ public:
             0,
             false,
             0);
-        add_primitive(
-            "_Bool",
+        auto bool_type = add_primitive(
+            "bool",
             Primitive_type::Category::INTEGER,
             1,
             false,
             0,
             1,
             1);
+        scopes.back().types["_Bool"] = bool_type;
         character_type = add_primitive(
             "char",
             Primitive_type::Category::CHARACTER,

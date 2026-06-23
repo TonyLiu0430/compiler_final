@@ -3,11 +3,11 @@ struct Pair {
     int second;
 };
 
-int sum(Pair *pair) {
+int sum(struct Pair *pair) {
     return pair->first + pair->second;
 }
 
 int main() {
-    Pair value = {20, 22};
+    struct Pair value = {20, 22};
     return sum(&value);
 }

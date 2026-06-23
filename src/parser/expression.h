@@ -195,7 +195,6 @@ struct Type_query_expression : Expression {
 
 inline bool expect_operator(lexer::Lexer &lexer, char ch, std::string_view message) {
     if (!lexer.has_next() ||
-        lexer.peek_next().raw.size() != 1 ||
         !lexer.peek_next().match<lexer::token_type::OPERATOR>(ch)) {
         lexer.report_error(std::string(message));
         return false;
@@ -240,8 +239,7 @@ inline bool can_start_expression(lexer::Token token) {
            token.match<lexer::token_type::NUMBER>() ||
            token.match<lexer::token_type::STRING_CONSTANT>() ||
            token.match<lexer::token_type::CHAR_CONSTANT>() ||
-           (token.raw.size() == 1 &&
-            token.match<lexer::token_type::OPERATOR>('(')) ||
+           token.match<lexer::token_type::OPERATOR>('(') ||
            (token.match<lexer::token_type::OPERATOR>() &&
             is_prefix_operator(token.raw));
 }
@@ -251,19 +249,16 @@ inline std::unique_ptr<Abstract_declarator> Abstract_declarator::match(
     auto cur = std::make_unique<Abstract_declarator>();
 
     while (lexer.has_next() &&
-           lexer.peek_next().raw.size() == 1 &&
            lexer.peek_next().match<lexer::token_type::OPERATOR>('*')) {
         lexer.next_token();
         cur->pointer_depth++;
     }
 
     while (lexer.has_next() &&
-           lexer.peek_next().raw.size() == 1 &&
            lexer.peek_next().match<lexer::token_type::OPERATOR>('[')) {
         lexer.next_token();
 
         if (lexer.has_next() &&
-            lexer.peek_next().raw.size() == 1 &&
             lexer.peek_next().match<lexer::token_type::OPERATOR>(']')) {
             lexer.next_token();
             cur->array_dimensions.push_back(nullptr);
@@ -343,7 +338,6 @@ inline std::unique_ptr<Expression> Expression::parse(lexer::Lexer &lexer, int mi
         bool has_type =
             probe_type &&
             probe.has_next() &&
-            probe.peek_next().raw.size() == 1 &&
             probe.peek_next().match<lexer::token_type::OPERATOR>(')');
 
         if (has_type) {
@@ -389,14 +383,12 @@ inline std::unique_ptr<Expression> Expression::parse(lexer::Lexer &lexer, int mi
             }
         }
     }
-    else if (token.raw.size() == 1 &&
-        token.match<lexer::token_type::OPERATOR>('(')) {
+    else if (token.match<lexer::token_type::OPERATOR>('(')) {
         lexer::Lexer probe = lexer;
         auto probe_type = Type_name::try_match(probe);
         bool is_cast =
             probe_type &&
             probe.has_next() &&
-            probe.peek_next().raw.size() == 1 &&
             probe.peek_next().match<lexer::token_type::OPERATOR>(')');
 
         if (is_cast) {
@@ -452,8 +444,7 @@ inline std::unique_ptr<Expression> Expression::parse(lexer::Lexer &lexer, int mi
     while (lexer.has_next()) {
         lexer::Token next = lexer.peek_next();
 
-        if (next.raw.size() == 1 &&
-            next.match<lexer::token_type::OPERATOR>('(')) {
+        if (next.match<lexer::token_type::OPERATOR>('(')) {
             if (15 < min_binding_power) break;
 
             lexer.next_token();
@@ -464,8 +455,7 @@ inline std::unique_ptr<Expression> Expression::parse(lexer::Lexer &lexer, int mi
                 return nullptr;
             }
 
-            if (lexer.peek_next().raw.size() != 1 ||
-                !lexer.peek_next().match<lexer::token_type::OPERATOR>(')')) {
+            if (!lexer.peek_next().match<lexer::token_type::OPERATOR>(')')) {
                 while (1) {
                     auto argument = parse(lexer, 2);
                     if (!argument) {
@@ -477,8 +467,8 @@ inline std::unique_ptr<Expression> Expression::parse(lexer::Lexer &lexer, int mi
                         lexer.report_error("expect ')' after arguments");
                         return nullptr;
                     }
-                    if (lexer.peek_next().raw.size() == 1 &&
-                        lexer.peek_next().match<lexer::token_type::OPERATOR>(')')) {
+                    if (lexer.peek_next().match<
+                            lexer::token_type::OPERATOR>(')')) {
                         break;
                     }
                     if (!expect_operator(lexer, ',', "expect ',' between arguments")) {
@@ -491,8 +481,7 @@ inline std::unique_ptr<Expression> Expression::parse(lexer::Lexer &lexer, int mi
             continue;
         }
 
-        if (next.raw.size() == 1 &&
-            next.match<lexer::token_type::OPERATOR>('[')) {
+        if (next.match<lexer::token_type::OPERATOR>('[')) {
             if (15 < min_binding_power) break;
 
             lexer.next_token();
@@ -535,8 +524,7 @@ inline std::unique_ptr<Expression> Expression::parse(lexer::Lexer &lexer, int mi
             continue;
         }
 
-        if (next.raw.size() == 1 &&
-            next.match<lexer::token_type::OPERATOR>('?')) {
+        if (next.match<lexer::token_type::OPERATOR>('?')) {
             if (3 < min_binding_power) break;
 
             lexer.next_token();

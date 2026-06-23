@@ -17,6 +17,7 @@ struct Parsed_type_specifier {
 
 inline bool is_builtin_type_word(std::string_view word) {
     return word == "void" ||
+           word == "bool" ||
            word == "_Bool" ||
            word == "char" ||
            word == "short" ||
@@ -31,6 +32,29 @@ inline bool is_builtin_type_word(std::string_view word) {
 inline std::optional<Parsed_type_specifier> match_type_specifier(
     lexer::Lexer &lexer,
     bool allow_unknown = false) {
+    if (lexer.has_next() &&
+        lexer.peek_next().match<lexer::token_type::K_STRUCT>()) {
+        lexer::Lexer probe = lexer;
+        auto first = probe.next_token();
+        if (!probe.has_next() ||
+            !probe.peek_next().match<
+                lexer::token_type::IDENTIFIER>()) {
+            return std::nullopt;
+        }
+
+        auto name = probe.next_token();
+        bool known = type_names::contains(name.raw);
+        if (!allow_unknown && !known) {
+            return std::nullopt;
+        }
+        lexer.sync(probe);
+        return Parsed_type_specifier{
+            first,
+            std::string(name.raw),
+            known
+        };
+    }
+
     if (!lexer.has_next() ||
         !lexer.peek_next().match<lexer::token_type::IDENTIFIER>()) {
         return std::nullopt;
@@ -74,7 +98,7 @@ inline std::optional<Parsed_type_specifier> match_type_specifier(
         float_count += word == "float";
         double_count += word == "double";
         void_count += word == "void";
-        bool_count += word == "_Bool";
+        bool_count += word == "bool" || word == "_Bool";
     }
 
     bool invalid =
@@ -104,7 +128,7 @@ inline std::optional<Parsed_type_specifier> match_type_specifier(
     else if (!invalid && bool_count) {
         invalid |= signed_count || unsigned_count ||
                    short_count || long_count || int_count;
-        name = "_Bool";
+        name = "bool";
     }
     else if (!invalid && float_count) {
         invalid |= signed_count || unsigned_count ||
