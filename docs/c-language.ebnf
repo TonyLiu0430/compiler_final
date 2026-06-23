@@ -1,3 +1,14 @@
+(*
+ * Grammar of the C subset implemented by this project.
+ *
+ * Expression is intentionally written as a compact left-recursive grammar.
+ * The parser implements it with Pratt parsing; precedence and associativity
+ * are defined by the operator table below.
+ *
+ * A traditional fully expanded expression grammar is retained in
+ * docs/c-language-detailed.ebnf.
+ *)
+
 program =
     { external-declaration } ;
 
@@ -5,6 +16,16 @@ external-declaration =
     function-definition
   | declaration
   | struct-definition ;
+
+function-definition =
+    declaration-specifiers,
+    declarator,
+    block ;
+
+(*
+ * In a function definition, declarator must denote a function. A pointer
+ * return type is allowed; a pointer-to-function object is not a definition.
+ *)
 
 struct-definition =
     "struct",
@@ -14,28 +35,14 @@ struct-definition =
     "}",
     ";" ;
 
-function-definition =
-    declaration-specifiers,
-    declarator,
-    block ;
-
-parameter-list =
-    parameter-declaration,
-    { ",", parameter-declaration } ;
-
-parameter-declaration =
-    declaration-specifiers,
-    [ declarator ] ;
-
 declaration =
     declaration-specifiers,
-    [ init-declarator-list ],
+    init-declarator-list,
     ";" ;
 
 declaration-specifiers =
     { storage-class-specifier | type-qualifier },
-    type-specifier,
-    { type-qualifier } ;
+    type-specifier ;
 
 storage-class-specifier =
     "static"
@@ -57,8 +64,16 @@ type-specifier =
   | "long", "double" ;
 
 integer-type =
-    [ "short" | "long", [ "long" ] ],
-    [ "int" ] ;
+    "int"
+  | "short", [ "int" ]
+  | "long", [ "int" ]
+  | "long", "long", [ "int" ] ;
+
+(*
+ * The alternatives above use canonical type spellings. The implementation
+ * also accepts valid reordered forms such as "long unsigned int" and
+ * normalizes them before semantic analysis.
+ *)
 
 typedef-name =
     IDENTIFIER ;
@@ -76,19 +91,27 @@ declarator =
     direct-declarator ;
 
 direct-declarator =
-    IDENTIFIER,
+    ( IDENTIFIER | "(", declarator, ")" ),
     { declarator-suffix } ;
 
 declarator-suffix =
     "[",
-    [ assignment-expression ],
+    [ expression-without-top-level-comma ],
     "]"
   | "(",
     [ parameter-list ],
     ")" ;
 
+parameter-list =
+    parameter-declaration,
+    { ",", parameter-declaration } ;
+
+parameter-declaration =
+    declaration-specifiers,
+    [ declarator ] ;
+
 initializer =
-    assignment-expression
+    expression-without-top-level-comma
   | initializer-list ;
 
 initializer-list =
@@ -110,12 +133,8 @@ statement =
 
 block =
     "{",
-    { block-item },
+    { declaration | statement },
     "}" ;
-
-block-item =
-    declaration
-  | statement ;
 
 if-statement =
     "if",
@@ -148,6 +167,15 @@ while-statement =
     ")",
     statement ;
 
+do-while-statement =
+    "do",
+    statement,
+    "while",
+    "(",
+    expression,
+    ")",
+    ";" ;
+
 for-statement =
     "for",
     "(",
@@ -160,33 +188,8 @@ for-statement =
 
 for-initializer =
     ";"
-  | expression,
-    ";"
+  | expression, ";"
   | declaration ;
-
-do-while-statement =
-    "do",
-    statement,
-    "while",
-    "(",
-    expression,
-    ")",
-    ";" ;
-
-type-name =
-    { type-qualifier },
-    type-specifier,
-    { type-qualifier },
-    [ abstract-declarator ] ;
-
-abstract-declarator =
-    { "*" },
-    { abstract-declarator-suffix } ;
-
-abstract-declarator-suffix =
-    "[",
-    [ assignment-expression ],
-    "]" ;
 
 expression-statement =
     [ expression ],
@@ -201,120 +204,61 @@ jump-statement =
   | "continue",
     ";" ;
 
+type-name =
+    { type-qualifier },
+    type-specifier,
+    { type-qualifier },
+    [ abstract-declarator ] ;
+
+abstract-declarator =
+    { "*" },
+    { "[", [ expression-without-top-level-comma ], "]" } ;
+
+(*
+ * Compact expression grammar.
+ *
+ * Left recursion describes postfix and infix composition directly.
+ * The Pratt parser resolves the intentional ambiguity using the precedence
+ * table below.
+ *)
+
 expression =
-    assignment-expression,
-    { ",", assignment-expression } ;
+    primary-expression
+  | "(", expression, ")"
+  | "(", type-name, ")", expression
+  | prefix-operator, expression
+  | "sizeof", "(", ( type-name | expression ), ")"
+  | "alignof", "(", type-name, ")"
+  | expression, postfix-operation
+  | expression, binary-operator, expression
+  | expression, "?", expression, ":", expression ;
 
-assignment-expression =
-    conditional-expression
-  | unary-expression,
-    assignment-operator,
-    assignment-expression ;
+expression-without-top-level-comma =
+    expression ;
 
-assignment-operator =
-    "="
-  | "*="
-  | "/="
-  | "%="
-  | "+="
-  | "-="
-  | "<<="
-  | ">>="
-  | "&="
-  | "^="
-  | "|=" ;
+(*
+ * expression-without-top-level-comma uses the same expression grammar, but
+ * the Pratt parser disables the outermost comma operator. Parenthesized comma
+ * expressions remain valid.
+ *)
 
-conditional-expression =
-    logical-or-expression,
-    [
-        "?",
-        expression,
-        ":",
-        conditional-expression
-    ] ;
+primary-expression =
+    IDENTIFIER
+  | NUMBER
+  | STRING_CONSTANT
+  | CHAR_CONSTANT ;
 
-logical-or-expression =
-    logical-and-expression,
-    { "||", logical-and-expression } ;
+postfix-operation =
+    "[", expression, "]"
+  | "(", [ argument-list ], ")"
+  | ".", IDENTIFIER
+  | "->", IDENTIFIER
+  | "++"
+  | "--" ;
 
-logical-and-expression =
-    inclusive-or-expression,
-    { "&&", inclusive-or-expression } ;
-
-inclusive-or-expression =
-    exclusive-or-expression,
-    { "|", exclusive-or-expression } ;
-
-exclusive-or-expression =
-    and-expression,
-    { "^", and-expression } ;
-
-and-expression =
-    equality-expression,
-    { "&", equality-expression } ;
-
-equality-expression =
-    relational-expression,
-    { equality-operator, relational-expression } ;
-
-equality-operator =
-    "=="
-  | "!=" ;
-
-relational-expression =
-    shift-expression,
-    { relational-operator, shift-expression } ;
-
-relational-operator =
-    "<"
-  | ">"
-  | "<="
-  | ">=" ;
-
-shift-expression =
-    additive-expression,
-    { shift-operator, additive-expression } ;
-
-shift-operator =
-    "<<"
-  | ">>" ;
-
-additive-expression =
-    multiplicative-expression,
-    { additive-operator, multiplicative-expression } ;
-
-additive-operator =
-    "+"
-  | "-" ;
-
-multiplicative-expression =
-    cast-expression,
-    { multiplicative-operator, cast-expression } ;
-
-multiplicative-operator =
-    "*"
-  | "/"
-  | "%" ;
-
-cast-expression =
-    unary-expression
-  | "(",
-    type-name,
-    ")",
-    cast-expression ;
-
-unary-expression =
-    postfix-expression
-  | prefix-operator,
-    unary-expression
-  | "sizeof",
-    "(",
-    ( type-name | expression ),
-    ")"
-  | "alignof",
-    "(",
-    type-name,
-    ")" ;
+argument-list =
+    expression-without-top-level-comma,
+    { ",", expression-without-top-level-comma } ;
 
 prefix-operator =
     "++"
@@ -326,82 +270,45 @@ prefix-operator =
   | "*"
   | "&" ;
 
-postfix-expression =
-    primary-expression,
-    { postfix-operation } ;
+binary-operator =
+    ","
+  | "=" | "*=" | "/=" | "%=" | "+=" | "-="
+  | "<<=" | ">>=" | "&=" | "^=" | "|="
+  | "||"
+  | "&&"
+  | "|"
+  | "^"
+  | "&"
+  | "==" | "!="
+  | "<" | ">" | "<=" | ">="
+  | "<<" | ">>"
+  | "+" | "-"
+  | "*" | "/" | "%" ;
 
-postfix-operation =
-    "[",
-    expression,
-    "]"
-  | "(",
-    [ argument-list ],
-    ")"
-  | ".",
-    IDENTIFIER
-  | "->",
-    IDENTIFIER
-  | "++"
-  | "--" ;
+(*
+ * Precedence from lowest to highest:
+ *
+ *   ,
+ *   =  *=  /=  %=  +=  -=  <<=  >>=  &=  ^=  |=
+ *   ?:
+ *   ||
+ *   &&
+ *   |
+ *   ^
+ *   &
+ *   ==  !=
+ *   <  >  <=  >=
+ *   <<  >>
+ *   +  -
+ *   *  /  %
+ *   prefix and cast
+ *   ()  []  .  ->  postfix ++  postfix --
+ *
+ * Assignment and conditional operators associate right-to-left.
+ * Other binary operators associate left-to-right.
+ *)
 
-argument-list =
-    assignment-expression,
-    { ",", assignment-expression } ;
-
-primary-expression =
-    IDENTIFIER
-  | NUMBER
-  | STRING_CONSTANT
-  | CHAR_CONSTANT
-  | "(",
-    expression,
-    ")" ;
-
-IDENTIFIER =
-    identifier-start,
-    { identifier-character } ;
-
-identifier-start =
-    LETTER
-  | "_" ;
-
-identifier-character =
-    LETTER
-  | DIGIT
-  | "_" ;
-
-NUMBER =
-    DIGIT,
-    { DIGIT | "." } ;
-
-STRING_CONSTANT =
-    '"',
-    { string-character | escape-sequence },
-    '"' ;
-
-CHAR_CONSTANT =
-    "'",
-    { character | escape-sequence },
-    "'" ;
-
-escape-sequence =
-    "\n"
-  | "\t"
-  | "\f"
-  | "\'"
-  | '\"'
-  | "\\" ;
-
-LETTER =
-    "a" | "b" | "c" | "d" | "e" | "f" | "g"
-  | "h" | "i" | "j" | "k" | "l" | "m" | "n"
-  | "o" | "p" | "q" | "r" | "s" | "t" | "u"
-  | "v" | "w" | "x" | "y" | "z"
-  | "A" | "B" | "C" | "D" | "E" | "F" | "G"
-  | "H" | "I" | "J" | "K" | "L" | "M" | "N"
-  | "O" | "P" | "Q" | "R" | "S" | "T" | "U"
-  | "V" | "W" | "X" | "Y" | "Z" ;
-
-DIGIT =
-    "0" | "1" | "2" | "3" | "4"
-  | "5" | "6" | "7" | "8" | "9" ;
+(*
+ * IDENTIFIER, NUMBER, STRING_CONSTANT and CHAR_CONSTANT are tokens produced
+ * by the lexer. Preprocessing is performed before this grammar is parsed.
+ *)
