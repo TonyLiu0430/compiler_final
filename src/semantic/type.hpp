@@ -181,12 +181,15 @@ struct Array_type : Type {
 struct Function_type : Type {
     Type_ptr return_type;
     std::vector<Type_ptr> parameters;
+    bool is_variadic = false;
 
     Function_type(
         Type_ptr _return_type,
-        std::vector<Type_ptr> _parameters)
+        std::vector<Type_ptr> _parameters,
+        bool _is_variadic = false)
         : return_type(std::move(_return_type)),
-          parameters(std::move(_parameters)) {}
+          parameters(std::move(_parameters)),
+          is_variadic(_is_variadic) {}
 
     bool is_complete() const override {
         return false;
@@ -280,10 +283,12 @@ inline Type_ptr make_array(
 
 inline Type_ptr make_function(
     Type_ptr return_type,
-    std::vector<Type_ptr> parameters) {
+    std::vector<Type_ptr> parameters,
+    bool is_variadic = false) {
     return std::make_shared<Function_type>(
         std::move(return_type),
-        std::move(parameters));
+        std::move(parameters),
+        is_variadic);
 }
 
 inline Type_ptr qualify(Type_ptr type, bool is_const) {
@@ -326,11 +331,13 @@ inline bool same_type(const Type_ptr &lhs, const Type_ptr &rhs) {
     auto rhs_function = as_type<Function_type>(rhs);
     if (lhs_function || rhs_function) {
         if (!lhs_function || !rhs_function ||
-            !same_type(
-                lhs_function->return_type,
-                rhs_function->return_type) ||
-            lhs_function->parameters.size() !=
-                rhs_function->parameters.size()) {
+             !same_type(
+                 lhs_function->return_type,
+                 rhs_function->return_type) ||
+             lhs_function->is_variadic !=
+                 rhs_function->is_variadic ||
+             lhs_function->parameters.size() !=
+                 rhs_function->parameters.size()) {
             return false;
         }
         for (int i = 0;

@@ -26,6 +26,7 @@ struct Symbol {
     const parser::Node *declaration = nullptr;
     Source_range range;
     bool is_defined = false;
+    bool has_static_storage = false;
 };
 
 struct Expression_info {
@@ -38,6 +39,7 @@ struct Semantic_result {
     Type_ptr void_type;
     Type_ptr character_type;
     Type_ptr integer_type;
+    Type_ptr double_type;
     Type_ptr size_type;
     Type_ptr ptrdiff_type;
     std::vector<std::unique_ptr<Symbol>> symbols;

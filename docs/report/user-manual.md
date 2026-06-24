@@ -132,30 +132,30 @@ Header：
 提供函式：
 
 ```c
-void writeText(char *text);
-void writeChar(char value);
+void write_text(char *text);
+void write_char(char value);
 void print(char *text);
-void printLine(char *text);
-void printInt(int value);
-void printIntLine(int value);
-void printLongLong(long long value);
-void printUnsignedLongLong(unsigned long long value);
+void println(char *text);
+void print_int(int value);
+void print_long_long(long long value);
+void print_unsigned_long_long(unsigned long long value);
+int printf(char *format, ...);
 ```
 
 編譯器也提供 builtin `printf`：
 
 ```c
-printf("%s: %d %u %c %%\n", text, value, unsigned_value, ch);
+printf("%s: %d %u %f %c %%\n", text, value, unsigned_value, ratio, ch);
 ```
 
 支援：
 
 ```text
-%% %s %c %d %i %u %ld %lu %lld %llu
+%% %s %c %d %i %u %ld %lu %lld %llu %f
 ```
 
 Format 必須是 string literal。它會在編譯期展開，不使用真正的 varargs。
-目前不支援 width、precision、`%f` 或動態 format，且回傳值固定為 `0`。
+`%f` 目前使用固定六位小數輸出。目前不支援 width、precision 或動態 format，且回傳值固定為 `0`。
 
 範例：
 
@@ -164,7 +164,8 @@ Format 必須是 string literal。它會在編譯期展開，不使用真正的 
 
 int main() {
     print("answer = ");
-    printIntLine(42);
+    print_int(42);
+    println("");
     return 0;
 }
 ```
@@ -232,7 +233,7 @@ tests/fixture_test.cpp
 - struct 變數可使用 `Name value;` 或 `struct Name value;`。
 - `sizeof` 只支援括號形式。
 - `alignof` 只接受 type name。
-- local static 尚未具有真正 static storage duration。
+- local static 具有 static storage duration，但 initializer 必須是常量初始化。
 - runtime 尚未提供 `argc`/`argv`。
 - executable 目前只明確連結 `kernel32`。
 - compiler 本身以 MinGW GCC 建置，執行 compiler 時可能需要將同一套 MinGW `bin` 放入 PATH。

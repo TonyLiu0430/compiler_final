@@ -328,7 +328,10 @@ class Semantic_analyzer {
                     parameters.push_back(parameter_type);
                 }
             }
-            type = make_function(type, std::move(parameters));
+            type = make_function(
+                type,
+                std::move(parameters),
+                declarator.is_variadic);
         }
         if (declarator.nested) {
             type = declarator_type(type, *declarator.nested);
@@ -748,6 +751,12 @@ class Semantic_analyzer {
                         error("printf %s requires a character pointer");
                     }
                 }
+                else if (part.kind ==
+                         builtin::Printf_part_kind::FLOATING) {
+                    if (!argument.type->is_floating()) {
+                        error("printf %f requires floating argument");
+                    }
+                }
                 else if (!argument.type->is_integer()) {
                     error(
                         "printf integer format requires integer argument");
@@ -765,10 +774,15 @@ class Semantic_analyzer {
         if (!function) {
             error("called expression is not a function");
         }
-        if (node.arguments.size() != function->parameters.size()) {
+        if ((!function->is_variadic &&
+             node.arguments.size() != function->parameters.size()) ||
+            (function->is_variadic &&
+             node.arguments.size() < function->parameters.size())) {
             error("wrong number of function arguments");
         }
-        for (int i = 0; i < static_cast<int>(node.arguments.size()); i++) {
+        for (int i = 0;
+             i < static_cast<int>(function->parameters.size());
+             i++) {
             auto argument = analyze_expression(*node.arguments[i]);
             if (!assignable(
                     function->parameters[i],
@@ -777,6 +791,11 @@ class Semantic_analyzer {
                   is_null_pointer_constant(*node.arguments[i]))) {
                 error("incompatible function argument");
             }
+        }
+        for (int i = static_cast<int>(function->parameters.size());
+             i < static_cast<int>(node.arguments.size());
+             i++) {
+            analyze_expression(*node.arguments[i]);
         }
         return Expression_info{function->return_type};
     }
@@ -943,6 +962,9 @@ class Semantic_analyzer {
             item.declarator->name.raw,
             type,
             item.declarator.get());
+        symbol->has_static_storage =
+            kind == Symbol::Kind::VARIABLE &&
+            (global || declaration.is_static);
 
         if (kind == Symbol::Kind::TYPEDEF_NAME) {
             auto name = std::string(item.declarator->name.raw);
@@ -1042,6 +1064,83 @@ class Semantic_analyzer {
         }
     }
 
+    bool static_initializer_is_constant(
+        const parser::Initializer &initializer,
+        Type_ptr target) {
+        if (auto expression_initializer =
+                dynamic_cast<const parser::Expression_initializer *>(
+                    &initializer)) {
+            auto expression = expression_initializer->expression.get();
+            auto primary =
+                dynamic_cast<const parser::Primary_expression *>(
+                    expression);
+
+            if (auto array = as_type<Array_type>(target);
+                array && is_character(array->element) &&
+                primary &&
+                primary->token.type ==
+                    lexer::token_type::STRING_CONSTANT) {
+                return true;
+            }
+
+            if (auto pointer = as_type<Pointer_type>(target)) {
+                if (primary &&
+                    primary->token.type ==
+                        lexer::token_type::STRING_CONSTANT &&
+                    is_character(pointer->element)) {
+                    return true;
+                }
+                auto value = evaluate_constant(*expression);
+                return value && value->value == 0;
+            }
+
+            if (target->is_floating()) {
+                return primary &&
+                       primary->token.type ==
+                           lexer::token_type::NUMBER;
+            }
+
+            return evaluate_constant(*expression).has_value();
+        }
+
+        auto list =
+            dynamic_cast<const parser::Initializer_list *>(
+                &initializer);
+        if (!list) return false;
+
+        if (auto record = as_type<Record_type>(target)) {
+            if (list->elements.size() > record->fields.size()) {
+                return false;
+            }
+            for (int i = 0;
+                 i < static_cast<int>(list->elements.size());
+                 i++) {
+                if (!static_initializer_is_constant(
+                        *list->elements[i],
+                        record->fields[i].type)) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        if (auto array = as_type<Array_type>(target)) {
+            for (auto &element : list->elements) {
+                if (!static_initializer_is_constant(
+                        *element,
+                        array->element)) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        return list->elements.empty() ||
+               static_initializer_is_constant(
+                   *list->elements[0],
+                   target);
+    }
+
     void analyze_declaration(
         const parser::Declvariable &declaration,
         bool global = false) {
@@ -1053,6 +1152,14 @@ class Semantic_analyzer {
                     error("invalid initializer");
                 }
                 analyze_initializer(*item->initializer, symbol->type);
+            }
+            if (!global &&
+                symbol->has_static_storage &&
+                item->initializer &&
+                !static_initializer_is_constant(
+                    *item->initializer,
+                    symbol->type)) {
+                error("static local initializer is not constant");
             }
         }
     }
@@ -1174,6 +1281,9 @@ class Semantic_analyzer {
         auto symbol = result.symbol(*function.declarator);
         auto function_type = as_type<Function_type>(symbol->type);
         if (!function_type) error("definition does not have function type");
+        if (function_type->is_variadic) {
+            error("variadic function definition is not supported");
+        }
         current_return_type = function_type->return_type;
 
         push_scope();
@@ -1339,6 +1449,7 @@ public:
         result.void_type = void_type;
         result.character_type = character_type;
         result.integer_type = integer_type;
+        result.double_type = double_type;
         result.size_type = size_type;
         result.ptrdiff_type = ptrdiff_type;
 

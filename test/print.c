@@ -1,8 +1,9 @@
 #include <c9ay.h>
 
 int main() {
-    printLine("Hello from c9ay");
+    println("Hello from c9ay");
     print("answer = ");
-    printIntLine(42);
+    print_int(42);
+    println("");
     return 0;
 }

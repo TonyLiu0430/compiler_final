@@ -177,6 +177,7 @@ struct Declarator : Node {
     std::unique_ptr<Declarator> nested;
     std::vector<std::unique_ptr<Expression>> array_dimensions;
     bool is_function = false;
+    bool is_variadic = false;
     std::vector<std::unique_ptr<Parameter_declaration>> parameters;
 
     Declarator(lexer::Token _name, int _pointer_depth)
@@ -823,6 +824,19 @@ inline std::unique_ptr<Declarator> Declarator::match(lexer::Lexer &lexer) {
             }
 
             while (1) {
+                if (lexer.peek_next().match<
+                        lexer::token_type::OPERATOR>("...")) {
+                    lexer.next_token();
+                    cur->is_variadic = true;
+                    if (!expect_operator(
+                            lexer,
+                            ')',
+                            "expect ')' after variadic parameter")) {
+                        return nullptr;
+                    }
+                    break;
+                }
+
                 auto parameter = Parameter_declaration::match(lexer);
                 if (!parameter) return nullptr;
                 cur->error_occur |= parameter->error_occur;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <filesystem>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -124,7 +125,7 @@ class LLVM_codegen {
         return llvm::FunctionType::get(
             type_of(type.return_type),
             parameters,
-            false);
+            type.is_variadic);
     }
 
     llvm::Type *type_node_of(
@@ -395,21 +396,25 @@ class LLVM_codegen {
         auto void_type = llvm::Type::getVoidTy(context);
         auto pointer_type = llvm::PointerType::get(context, 0);
         auto write_text = runtime_function(
-            "writeText",
+            "write_text",
             void_type,
             {pointer_type});
         auto write_char = runtime_function(
-            "writeChar",
+            "write_char",
             void_type,
             {type_of(semantic_result.character_type)});
         auto print_signed = runtime_function(
-            "printLongLong",
+            "print_long_long",
             void_type,
             {type_of(semantic_result.ptrdiff_type)});
         auto print_unsigned = runtime_function(
-            "printUnsignedLongLong",
+            "print_unsigned_long_long",
             void_type,
             {type_of(semantic_result.size_type)});
+        auto print_float = runtime_function(
+            "print_float",
+            void_type,
+            {type_of(semantic_result.double_type)});
 
         int argument_index = 1;
         for (auto &part : parsed->parts) {
@@ -461,12 +466,22 @@ class LLVM_codegen {
                         semantic_result.ptrdiff_type,
                         source)});
             }
-            else {
+            else if (
+                part.kind ==
+                builtin::Printf_part_kind::UNSIGNED_INTEGER) {
                 builder.CreateCall(
                     print_unsigned,
                     {convert(
                         value,
                         semantic_result.size_type,
+                        source)});
+            }
+            else {
+                builder.CreateCall(
+                    print_float,
+                    {convert(
+                        value,
+                        semantic_result.double_type,
                         source)});
             }
         }
@@ -530,6 +545,21 @@ class LLVM_codegen {
         scopes.back().insert_or_assign(
             std::string(name),
             address);
+    }
+
+    std::string static_local_name(
+        const semantic::Symbol &symbol,
+        std::string_view name) const {
+        std::string result;
+        if (current_function) {
+            result += current_function->getName().str();
+            result += ".";
+        }
+        result += std::string(name);
+        result += ".static.";
+        result += std::to_string(
+            reinterpret_cast<std::uintptr_t>(&symbol));
+        return result;
     }
 
     llvm::Value *find_address(std::string_view name) {
@@ -758,6 +788,26 @@ class LLVM_codegen {
             if (!symbol) unsupported("declaration symbol");
             if (symbol->kind == semantic::Symbol::Kind::FUNCTION) continue;
             llvm::Type *type = type_of(symbol->type);
+            if (symbol->has_static_storage) {
+                llvm::Constant *initializer =
+                    llvm::Constant::getNullValue(type);
+                if (init_declarator->initializer) {
+                    initializer = constant_initializer(
+                        *init_declarator->initializer,
+                        symbol->type);
+                }
+                auto name =
+                    static_local_name(*symbol, declarator.name.raw);
+                auto global = new llvm::GlobalVariable(
+                    *module,
+                    type,
+                    node.is_const,
+                    llvm::GlobalValue::InternalLinkage,
+                    initializer,
+                    name);
+                declare(declarator.name.raw, global);
+                continue;
+            }
             auto alloca = create_entry_alloca(
                 current_function,
                 type,

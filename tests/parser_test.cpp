@@ -1762,6 +1762,48 @@ TEST_CASE("LLVM backend emits object and executable files") {
     std::filesystem::remove(executable);
 }
 
+TEST_CASE("local static variables keep state between calls") {
+    std::string source = R"(
+        int next() {
+            static int value = 40 + 1;
+            value = value + 1;
+            return value;
+        }
+
+        int main() {
+            int first = next();
+            int second = next();
+            return first + second - 85;
+        }
+    )";
+
+    Reader reader("local-static.c", source);
+    lexer::LexerMgr mgr(reader);
+    auto lexer = mgr.get_lexer();
+    auto program = parser::Program::match(lexer);
+
+    auto directory = std::filesystem::temp_directory_path();
+    auto executable = directory / "c9ay-local-static.exe";
+    std::filesystem::remove(executable);
+
+    codegen::LLVM_codegen codegen("local_static");
+    codegen.generate(*program);
+    codegen.emit_executable(executable);
+
+    std::string program_path = executable.string();
+    std::vector<llvm::StringRef> arguments = {
+        program_path
+    };
+    int result = llvm::sys::ExecuteAndWait(
+        program_path,
+        arguments);
+
+    CHECK(result == 0);
+    CHECK(codegen.ir().find(".static.") != std::string::npos);
+
+    std::filesystem::remove(executable);
+}
+
 TEST_CASE("LLVM codegen handles multidimensional arrays and scalar braces") {
     std::string source = R"(
         int matrix[2][3] = {
@@ -1841,12 +1883,12 @@ TEST_CASE("c9ay runtime prints observable console output") {
 
         int main() {
             print("text:");
-            printInt(42);
-            writeChar(' ');
-            printInt(-7);
-            writeChar(' ');
-            printInt(-2147483647 - 1);
-            printLine("");
+            print_int(42);
+            write_char(' ');
+            print_int(-7);
+            write_char(' ');
+            print_int(-2147483647 - 1);
+            println("");
             return 0;
         }
     )";
@@ -1910,12 +1952,16 @@ TEST_CASE("builtin printf expands literal format at compile time") {
             char *text = "value";
             unsigned long long maximum =
                 18446744073709551615ULL;
+            float ratio = 3.5f;
+            double negative = -0.25;
             printf(
-                "%s: %d %u %c %%\n",
+                "%s: %d %u %c %f %f %%\n",
                 text,
                 -42,
                 maximum,
-                '!');
+                '!',
+                ratio,
+                negative);
             return 0;
         }
     )";
@@ -1958,7 +2004,7 @@ TEST_CASE("builtin printf expands literal format at compile time") {
         std::istreambuf_iterator<char>()};
     CHECK(
         text ==
-        "value: -42 18446744073709551615 ! %\n");
+        "value: -42 18446744073709551615 ! 3.500000 -0.250000 %\n");
 
     output_file.close();
     std::filesystem::remove(executable);
@@ -1983,5 +2029,29 @@ TEST_CASE("builtin printf rejects dynamic format strings") {
     CHECK_THROWS_WITH_AS(
         analyzer.analyze(*program),
         "compile error: printf format must be a string literal",
+        semantic::Compile_error);
+}
+
+TEST_CASE("semantic analysis rejects non-constant local static initializer") {
+    std::string source = R"(
+        int read() {
+            return 42;
+        }
+
+        int main() {
+            static int value = read();
+            return value;
+        }
+    )";
+
+    Reader reader("bad-local-static.c", source);
+    lexer::LexerMgr mgr(reader);
+    auto lexer = mgr.get_lexer();
+    auto program = parser::Program::match(lexer);
+
+    semantic::Semantic_analyzer analyzer;
+    CHECK_THROWS_WITH_AS(
+        analyzer.analyze(*program),
+        "compile error: static local initializer is not constant",
         semantic::Compile_error);
 }

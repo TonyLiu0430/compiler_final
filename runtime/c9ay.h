@@ -1,14 +1,16 @@
 #ifndef C9AY_H
 #define C9AY_H
 
-void writeText(char *text);
-void writeChar(char value);
+void write_text(char *text);
+void write_char(char value);
 
 void print(char *text);
-void printLine(char *text);
-void printInt(int value);
-void printIntLine(int value);
-void printLongLong(long long value);
-void printUnsignedLongLong(unsigned long long value);
+void println(char *text);
+void print_int(int value);
+void print_long_long(long long value);
+void print_unsigned_long_long(unsigned long long value);
+void print_float(double value);
+
+int printf(char *format, ...);
 
 #endif

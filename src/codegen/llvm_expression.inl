@@ -504,10 +504,14 @@ inline llvm::Value *LLVM_codegen::expression_node(
     int argument_index = 0;
     for (auto &argument : node.arguments) {
         auto value = expression(*argument);
-        value = convert(
-            value,
-            semantic_function->parameters[argument_index++],
-            semantic_result.info(*argument).type);
+        if (argument_index <
+            static_cast<int>(semantic_function->parameters.size())) {
+            value = convert(
+                value,
+                semantic_function->parameters[argument_index],
+                semantic_result.info(*argument).type);
+        }
+        argument_index++;
         arguments.push_back(value);
     }
     return builder.CreateCall(

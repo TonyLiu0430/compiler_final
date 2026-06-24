@@ -1,6 +1,6 @@
 #include <c9ay.h>
 
 int main() {
-    printLine("fixture");
+    println("fixture");
     return 0;
 }

@@ -13,7 +13,8 @@ enum class Printf_part_kind {
     SIGNED_INTEGER,
     UNSIGNED_INTEGER,
     STRING,
-    CHARACTER
+    CHARACTER,
+    FLOATING
 };
 
 struct Printf_part {
@@ -94,6 +95,12 @@ inline std::optional<Printf_format> parse_printf_format(
                 return fail("unsupported printf character length modifier");
             }
             kind = Printf_part_kind::CHARACTER;
+        }
+        else if (format[i] == 'f') {
+            if (length != 0) {
+                return fail("unsupported printf floating length modifier");
+            }
+            kind = Printf_part_kind::FLOATING;
         }
         else {
             return fail(
