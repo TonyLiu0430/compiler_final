@@ -4,3 +4,4 @@ docs/*
 !docs/user-manual.md
 !docs/*.ebnf
 .temp
+package/
