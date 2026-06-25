@@ -221,6 +221,8 @@ Expression 使用 Pratt Parser，支援：
 - comma operator
 - short-circuit `&&`、`||`。
 
+語意分析時會為每個 expression 記錄 `depth` 與 `node_count`。目前常量求值只在語言規則要求時執行，例如陣列長度、`case` label、`sizeof` / `alignof`、global/static initializer；一般最佳化仍交給 LLVM。記錄 expression 複雜度後，未來可以依 `-O0`、`-O1`、`-O2`、`-O3` 設定 frontend constant folding 的深度或節點數 budget，避免對過大的 AST 做過度遞迴求值而拖慢編譯。
+
 另外提供 compiler builtin `printf`。它不使用 C varargs ABI，而要求
 format 為 string literal，並在編譯期展開為 runtime 輸出函式呼叫。目前
 支援 `%%`、`%s`、`%c`、`%d`、`%i`、`%u`、`%ld`、`%lu`、

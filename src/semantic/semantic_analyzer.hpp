@@ -1,6 +1,8 @@
 #pragma once
 
 #include <stdexcept>
+#include <algorithm>
+#include <initializer_list>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -61,6 +63,30 @@ class Semantic_analyzer {
     Diagnostic *diagnostics = nullptr;
     Source_range current_range;
     int loop_depth = 0;
+
+    static Expression_info expression_shape(
+        Expression_info info,
+        std::initializer_list<Expression_info> children = {}) {
+        info.depth = 1;
+        info.node_count = 1;
+        for (auto &child : children) {
+            info.depth = std::max(info.depth, child.depth + 1);
+            info.node_count += child.node_count;
+        }
+        return info;
+    }
+
+    static Expression_info expression_shape(
+        Expression_info info,
+        const std::vector<Expression_info> &children) {
+        info.depth = 1;
+        info.node_count = 1;
+        for (auto &child : children) {
+            info.depth = std::max(info.depth, child.depth + 1);
+            info.node_count += child.node_count;
+        }
+        return info;
+    }
 
     [[noreturn]] void error(std::string_view message) {
         if (diagnostics) {
@@ -475,7 +501,7 @@ class Semantic_analyzer {
             node,
             [this](const auto &expression) {
                 return analyze_expression_node(expression);
-            });
+        });
         current_range = previous_range;
         result.expressions[&node] = info;
         return info;
@@ -511,7 +537,7 @@ class Semantic_analyzer {
                 symbol->kind == Symbol::Kind::VARIABLE ||
                 symbol->kind == Symbol::Kind::PARAMETER;
         }
-        return info;
+        return expression_shape(info);
     }
 
     Expression_info analyze_expression_node(
@@ -561,7 +587,7 @@ class Semantic_analyzer {
                     ? promote_integer(operand.type)
                     : operand.type;
         }
-        return info;
+        return expression_shape(info, {operand});
     }
 
     Expression_info analyze_expression_node(
@@ -575,7 +601,7 @@ class Semantic_analyzer {
             !is_object_pointer(operand.type)) {
             error("pointer arithmetic requires complete object type");
         }
-        return Expression_info{operand.type};
+        return expression_shape(Expression_info{operand.type}, {operand});
     }
 
     Expression_info analyze_expression_node(
@@ -694,7 +720,7 @@ class Semantic_analyzer {
                 lhs.type,
                 rhs.type);
         }
-        return info;
+        return expression_shape(info, {lhs, rhs});
     }
 
     Expression_info analyze_expression_node(
@@ -730,7 +756,9 @@ class Semantic_analyzer {
                 error("printf argument count does not match format");
             }
 
-            analyze_expression(*node.arguments[0]);
+            std::vector<Expression_info> children;
+            children.push_back(Expression_info{integer_type});
+            children.push_back(analyze_expression(*node.arguments[0]));
             int argument_index = 1;
             for (auto &part : parsed->parts) {
                 if (part.kind ==
@@ -739,6 +767,7 @@ class Semantic_analyzer {
                 }
                 auto argument = analyze_expression(
                     *node.arguments[argument_index++]);
+                children.push_back(argument);
                 if (part.kind ==
                         builtin::Printf_part_kind::STRING) {
                     auto type = argument.type;
@@ -762,10 +791,13 @@ class Semantic_analyzer {
                         "printf integer format requires integer argument");
                 }
             }
-            return Expression_info{integer_type};
+            return expression_shape(
+                Expression_info{integer_type},
+                children);
         }
 
         auto callee = analyze_expression(*node.callee);
+        std::vector<Expression_info> children = {callee};
         Type_ptr function_type = callee.type;
         if (auto pointer = as_type<Pointer_type>(function_type)) {
             function_type = pointer->element;
@@ -784,6 +816,7 @@ class Semantic_analyzer {
              i < static_cast<int>(function->parameters.size());
              i++) {
             auto argument = analyze_expression(*node.arguments[i]);
+            children.push_back(argument);
             if (!assignable(
                     function->parameters[i],
                     argument.type) &&
@@ -795,9 +828,11 @@ class Semantic_analyzer {
         for (int i = static_cast<int>(function->parameters.size());
              i < static_cast<int>(node.arguments.size());
              i++) {
-            analyze_expression(*node.arguments[i]);
+            children.push_back(analyze_expression(*node.arguments[i]));
         }
-        return Expression_info{function->return_type};
+        return expression_shape(
+            Expression_info{function->return_type},
+            children);
     }
 
     Expression_info analyze_expression_node(
@@ -813,7 +848,9 @@ class Semantic_analyzer {
             !is_object_pointer(object_type)) {
             error("invalid array subscript");
         }
-        return Expression_info{pointer->element, true};
+        return expression_shape(
+            Expression_info{pointer->element, true},
+            {object, index});
     }
 
     Expression_info analyze_expression_node(
@@ -842,10 +879,12 @@ class Semantic_analyzer {
                 "' has no member '" +
                 std::string(node.member.raw) + "'");
         }
-        return Expression_info{
-            record->fields[index].type,
-            is_lvalue
-        };
+        return expression_shape(
+            Expression_info{
+                record->fields[index].type,
+                is_lvalue
+            },
+            {object});
     }
 
     Expression_info analyze_expression_node(
@@ -858,40 +897,55 @@ class Semantic_analyzer {
         }
         if (true_info.type->is_arithmetic() &&
             false_info.type->is_arithmetic()) {
-            return Expression_info{
-                common_arithmetic_type(
-                    true_info.type,
-                    false_info.type)
-            };
+            return expression_shape(
+                Expression_info{
+                    common_arithmetic_type(
+                        true_info.type,
+                        false_info.type)
+                },
+                {condition, true_info, false_info});
         }
         if (as_type<Pointer_type>(true_info.type) &&
             is_null_pointer_constant(*node.false_expression)) {
-            return Expression_info{true_info.type};
+            return expression_shape(
+                Expression_info{true_info.type},
+                {condition, true_info, false_info});
         }
         if (as_type<Pointer_type>(false_info.type) &&
             is_null_pointer_constant(*node.true_expression)) {
-            return Expression_info{false_info.type};
+            return expression_shape(
+                Expression_info{false_info.type},
+                {condition, true_info, false_info});
         }
         if (!assignable(true_info.type, false_info.type) &&
             !assignable(false_info.type, true_info.type)) {
             error("conditional branches have incompatible types");
         }
-        return Expression_info{
-            true_info.type,
-            true_info.is_lvalue && false_info.is_lvalue
-        };
+        return expression_shape(
+            Expression_info{
+                true_info.type,
+                true_info.is_lvalue && false_info.is_lvalue
+            },
+            {condition, true_info, false_info});
     }
 
     Expression_info analyze_expression_node(
         const parser::Cast_expression &node) {
-        analyze_expression(*node.operand);
-        return Expression_info{type_name(*node.type)};
+        auto operand = analyze_expression(*node.operand);
+        return expression_shape(
+            Expression_info{type_name(*node.type)},
+            {operand});
     }
 
     Expression_info analyze_expression_node(
         const parser::Type_query_expression &node) {
         type_query_value(node);
-        return Expression_info{size_type};
+        if (node.operand) {
+            return expression_shape(
+                Expression_info{size_type},
+                {analyze_expression(*node.operand)});
+        }
+        return expression_shape(Expression_info{size_type});
     }
 
     Expression_info analyze_expression_node(

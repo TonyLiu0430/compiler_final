@@ -111,17 +111,29 @@ public:
         const std::filesystem::path &object,
         const std::filesystem::path &executable,
         const std::vector<std::filesystem::path> &libraries = {}) {
-        auto linker = llvm::sys::findProgramByName("ld");
-        if (!linker) {
+#if defined(C9AY_MINGW_BIN_DIR)
+        auto linker_path =
+            std::filesystem::path(C9AY_MINGW_BIN_DIR) / "ld.exe";
+        auto linker = linker_path.string();
+#else
+        auto found_linker = llvm::sys::findProgramByName("ld");
+        if (!found_linker) {
             throw std::runtime_error(
                 "cannot find MinGW ld linker in PATH");
         }
+        auto linker = *found_linker;
+#endif
 
-        auto toolchain = std::filesystem::path(*linker)
+#if defined(C9AY_MINGW_LIBRARY_DIR)
+        auto windows_library_directory =
+            std::filesystem::path(C9AY_MINGW_LIBRARY_DIR);
+#else
+        auto toolchain = std::filesystem::path(linker)
             .parent_path()
             .parent_path();
         auto windows_library_directory =
             toolchain / "x86_64-w64-mingw32" / "lib";
+#endif
         if (!std::filesystem::exists(
                 windows_library_directory / "libkernel32.a")) {
             throw std::runtime_error(
@@ -129,7 +141,7 @@ public:
         }
 
         std::vector<std::string> arguments_storage = {
-            *linker,
+            linker,
             "-m",
             "i386pep",
             "--entry",
@@ -154,7 +166,7 @@ public:
 
         std::string error;
         int result = llvm::sys::ExecuteAndWait(
-            *linker,
+            linker,
             arguments,
             std::nullopt,
             {},

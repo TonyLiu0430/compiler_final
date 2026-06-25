@@ -33,6 +33,8 @@ struct Expression_info {
     Type_ptr type;
     bool is_lvalue = false;
     const Symbol *symbol = nullptr;
+    int depth = 1;
+    int node_count = 1;
 };
 
 struct Semantic_result {

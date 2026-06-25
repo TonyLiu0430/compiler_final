@@ -2055,3 +2055,30 @@ TEST_CASE("semantic analysis rejects non-constant local static initializer") {
         "compile error: static local initializer is not constant",
         semantic::Compile_error);
 }
+
+TEST_CASE("semantic analysis records expression depth and node count") {
+    std::string source = R"(
+        int main() {
+            return (1 + 2) * (3 + 4);
+        }
+    )";
+
+    Reader reader("expression-shape.c", source);
+    lexer::LexerMgr mgr(reader);
+    auto lexer = mgr.get_lexer();
+    auto program = parser::Program::match(lexer);
+
+    auto function =
+        dynamic_cast<parser::Function_definition *>(
+            program->external_declarations[0].get());
+    auto return_statement =
+        dynamic_cast<parser::Return_statement *>(
+            function->body->statements[0].get());
+
+    semantic::Semantic_analyzer analyzer;
+    auto result = analyzer.analyze(*program);
+    auto info = result.info(*return_statement->expression);
+
+    CHECK(info.depth == 3);
+    CHECK(info.node_count == 7);
+}

@@ -8,6 +8,8 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 option(ENABLE_EXPERIMENTAL_REFLECTION "Enable experimental C++26 reflection support" OFF)
 option(ENABLE_LLVM_CODEGEN "Build the LLVM code generator" ON)
 option(C9AY_BUILD_LLVM "Build LLVM inside this project (one-time bootstrap)" OFF)
+option(C9AY_STATIC_MINGW_RUNTIME "Link libgcc and winpthreads statically when using MinGW" ON)
+option(C9AY_STATIC_LIBSTDCXX "Experimentally link libstdc++ statically when using MinGW" OFF)
 
 file(GLOB_RECURSE HEADERS CONFIGURE_DEPENDS
     "src/*.h"
@@ -41,6 +43,32 @@ target_compile_definitions(compiler PRIVATE
     C9AY_INCLUDE_DIR="${C9AY_INCLUDE_DIRECTORY_DEFINE}"
     C9AY_RUNTIME_OBJECT="${C9AY_RUNTIME_OBJECT_DEFINE}"
 )
+
+if(MINGW AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    get_filename_component(C9AY_MINGW_BIN_DIRECTORY
+        "${CMAKE_CXX_COMPILER}"
+        DIRECTORY
+    )
+    get_filename_component(C9AY_MINGW_ROOT
+        "${C9AY_MINGW_BIN_DIRECTORY}"
+        DIRECTORY
+    )
+    set(C9AY_MINGW_LIBRARY_DIRECTORY
+        "${C9AY_MINGW_ROOT}/x86_64-w64-mingw32/lib"
+    )
+    file(TO_CMAKE_PATH
+        "${C9AY_MINGW_BIN_DIRECTORY}"
+        C9AY_MINGW_BIN_DIRECTORY_DEFINE
+    )
+    file(TO_CMAKE_PATH
+        "${C9AY_MINGW_LIBRARY_DIRECTORY}"
+        C9AY_MINGW_LIBRARY_DIRECTORY_DEFINE
+    )
+    target_compile_definitions(compiler PRIVATE
+        C9AY_MINGW_BIN_DIR="${C9AY_MINGW_BIN_DIRECTORY_DEFINE}"
+        C9AY_MINGW_LIBRARY_DIR="${C9AY_MINGW_LIBRARY_DIRECTORY_DEFINE}"
+    )
+endif()
 
 if(ENABLE_LLVM_CODEGEN)
     set(C9AY_LLVM_DIR
@@ -156,9 +184,51 @@ if(ENABLE_EXPERIMENTAL_REFLECTION)
     endif()
 endif()
 
+function(c9ay_apply_mingw_link_options target)
+    if(MINGW AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        target_link_libraries(${target} PRIVATE stdc++exp)
+        target_link_options(${target} PRIVATE -s)
+
+        if(C9AY_STATIC_MINGW_RUNTIME)
+            # Keep LLVM/component libraries linked in their configured mode.
+            # Do not use a global "-static" here.
+            target_link_options(${target} PRIVATE
+                -static-libgcc
+                -Wl,-Bstatic
+                -lwinpthread
+                -Wl,-Bdynamic
+            )
+        endif()
+
+        if(C9AY_STATIC_LIBSTDCXX)
+            target_link_options(${target} PRIVATE -static-libstdc++)
+        endif()
+    endif()
+endfunction()
+
+function(c9ay_copy_mingw_runtime_dlls target)
+    if(MINGW AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        foreach(dll IN ITEMS
+            libstdc++-6.dll
+            libgcc_s_seh-1.dll
+            libwinpthread-1.dll
+        )
+            set(dll_path "${C9AY_MINGW_BIN_DIRECTORY}/${dll}")
+            if(EXISTS "${dll_path}")
+                add_custom_command(TARGET ${target} POST_BUILD
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        "${dll_path}"
+                        "$<TARGET_FILE_DIR:${target}>/${dll}"
+                    VERBATIM
+                )
+            endif()
+        endforeach()
+    endif()
+endfunction()
+
 if(MINGW AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    target_link_libraries(compiler PRIVATE stdc++exp)
-    target_link_options(compiler PRIVATE -s)
+    c9ay_apply_mingw_link_options(compiler)
+    c9ay_copy_mingw_runtime_dlls(compiler)
 endif()
 
 add_custom_command(
@@ -194,6 +264,12 @@ if(BUILD_TESTING)
         C9AY_RUNTIME_OBJECT="${C9AY_RUNTIME_OBJECT_DEFINE}"
         C9AY_TEST_DIRECTORY="${CMAKE_CURRENT_SOURCE_DIR}/test"
     )
+    if(MINGW AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        target_compile_definitions(compiler_tests PRIVATE
+            C9AY_MINGW_BIN_DIR="${C9AY_MINGW_BIN_DIRECTORY_DEFINE}"
+            C9AY_MINGW_LIBRARY_DIR="${C9AY_MINGW_LIBRARY_DIRECTORY_DEFINE}"
+        )
+    endif()
 
     if(ENABLE_LLVM_CODEGEN)
         target_link_libraries(compiler_tests PRIVATE c9ay_llvm)
@@ -205,8 +281,8 @@ if(BUILD_TESTING)
 
     if(MINGW AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
         target_compile_options(compiler_tests PRIVATE -Wa,-mbig-obj)
-        target_link_libraries(compiler_tests PRIVATE stdc++exp)
-        target_link_options(compiler_tests PRIVATE -s)
+        c9ay_apply_mingw_link_options(compiler_tests)
+        c9ay_copy_mingw_runtime_dlls(compiler_tests)
     endif()
 
     add_test(NAME compiler_tests COMMAND compiler_tests)
